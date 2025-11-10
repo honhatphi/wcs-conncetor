@@ -7,27 +7,20 @@ namespace TQG.Automation.SDK.Events;
 /// Raised when ErrorAlarm flag is detected during command execution.
 /// This is an informational event - the task may continue or fail depending on failOnAlarm configuration.
 /// </summary>
-public sealed class TaskAlarmEventArgs : EventArgs
+public sealed class TaskAlarmEventArgs(string deviceId, string taskId, ErrorDetail error) : EventArgs
 {
     /// <summary>
     /// Device ID where the alarm occurred.
     /// </summary>
-    public string DeviceId { get; }
+    public string DeviceId { get; } = deviceId ?? throw new ArgumentNullException(nameof(deviceId));
 
     /// <summary>
     /// Command/Task ID that encountered the alarm.
     /// </summary>
-    public string TaskId { get; }
+    public string TaskId { get; } = taskId ?? throw new ArgumentNullException(nameof(taskId));
 
     /// <summary>
     /// Error details from PLC (error code and message).
     /// </summary>
-    public ErrorDetail Error { get; }
-
-    public TaskAlarmEventArgs(string deviceId, string taskId, ErrorDetail error)
-    {
-        DeviceId = deviceId ?? throw new ArgumentNullException(nameof(deviceId));
-        TaskId = taskId ?? throw new ArgumentNullException(nameof(taskId));
-        Error = error ?? throw new ArgumentNullException(nameof(error));
-    }
+    public ErrorDetail Error { get; } = error ?? throw new ArgumentNullException(nameof(error));
 }

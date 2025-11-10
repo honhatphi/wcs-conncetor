@@ -2,7 +2,7 @@ using S7.Net;
 using System.Net.Sockets;
 using PlcException = TQG.Automation.SDK.Exceptions.PlcException;
 using PlcConnectionException = TQG.Automation.SDK.Exceptions.PlcConnectionFailedException;
-using PlcTimeoutException = TQG.Automation.SDK.Exceptions.PlcTimeoutException;
+using PlcTimeoutException = TQG.Automation.SDK.Exceptions.TimeoutException;
 using PlcInvalidAddressException = TQG.Automation.SDK.Exceptions.PlcInvalidAddressException;
 using PlcDataFormatException = TQG.Automation.SDK.Exceptions.PlcDataFormatException;
 using TQG.Automation.SDK.Core;

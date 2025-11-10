@@ -243,7 +243,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             ExecutionStatus.Error,
             $"Worker error: {exception.Message}");
 
-        await   TryPublishResultAsync(result);
+        await TryPublishResultAsync(result);
 
         if (!cancellationToken.IsCancellationRequested)
         {
@@ -465,7 +465,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
         {
             try
             {
-                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
+                bool isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
 
                 if (isReady)
                 {

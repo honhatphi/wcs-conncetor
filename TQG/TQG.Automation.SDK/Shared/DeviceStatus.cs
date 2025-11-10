@@ -1,48 +1,28 @@
+using System.ComponentModel;
+
 namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
-/// Represents the current status of a device.
-/// Contains connection state, readiness, and current activity information.
+/// Represents the operational status of a device.
+/// Note: If device is offline or link not established, GetDeviceStatusAsync will throw PlcConnectionFailedException.
 /// </summary>
-public sealed record DeviceStatus
+public enum DeviceStatus
 {
     /// <summary>
-    /// Device identifier.
+    /// Thiết bị rảnh rỗi và sẵn sàng nhận nhiệm vụ mới.
     /// </summary>
-    public required string DeviceId { get; init; }
+    [Description("Idle")]
+    Idle,
 
     /// <summary>
-    /// Whether the device is physically connected.
+    /// Thiết bị đang thực thi một nhiệm vụ.
     /// </summary>
-    public bool IsConnected { get; init; }
+    [Description("Busy")]
+    Busy,
 
     /// <summary>
-    /// Whether the link between DLL and PLC program is established.
+    /// Thiết bị ở trạng thái lỗi và cần được xử lý.
     /// </summary>
-    public bool IsLinkEstablished { get; init; }
-
-    /// <summary>
-    /// Whether the device is ready to accept commands.
-    /// </summary>
-    public bool IsReady { get; init; }
-
-    /// <summary>
-    /// The currently executing command ID, or null if device is idle.
-    /// </summary>
-    public string? CurrentCommandId { get; init; }
-
-    /// <summary>
-    /// Current location of the device (if available).
-    /// </summary>
-    public Location? CurrentLocation { get; init; }
-
-    /// <summary>
-    /// Device operational capabilities.
-    /// </summary>
-    public DeviceCapabilities Capabilities { get; init; } = DeviceCapabilities.Default;
-
-    /// <summary>
-    /// Timestamp when the status was retrieved.
-    /// </summary>
-    public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;
+    [Description("Error")]
+    Error,
 }

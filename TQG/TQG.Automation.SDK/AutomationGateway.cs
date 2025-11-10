@@ -201,64 +201,70 @@ public sealed class AutomationGateway : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets the detailed status of a specific device including connection state, readiness, and current activity.
+    /// Gets the detailed status of a specific device.
+    /// Status determination logic:
+    /// - Error: Alarm detected (ErrorAlarm = true)
+    /// - Busy: Device is executing a command
+    /// - Idle: Device is ready and available
     /// </summary>
     /// <param name="deviceId">Unique device identifier.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <returns>Device status with all available information, or null if device not found.</returns>
-    public Task<DeviceStatus?> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
+    /// <returns>Device status enum.</returns>
+    /// <exception cref="ArgumentException">Thrown when deviceId is null or empty.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, offline, or link is not established.</exception>
+    public async Task<DeviceStatus> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
     {
-        return Task.Run(async () =>
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ArgumentException("Device ID cannot be null or empty.", nameof(deviceId));
+
+        if (!_registry.TryGetManager(deviceId, out var manager))
+            throw new PlcConnectionFailedException($"Device '{deviceId}' not found. Please ensure the device is registered.");
+
+        var client = manager!.Client;
+        var config = manager.Options;
+
+        var isConnected = manager.IsConnected;
+
+        // If not connected, throw exception
+        if (!isConnected)
+            throw new PlcConnectionFailedException($"Device '{deviceId}' is offline. Please connect the device using ActivateDevice() before checking status.");
+
+        try
         {
-            ObjectDisposedException.ThrowIf(_isDisposed, this);
+            // Check if link is established
+            var isLinkEstablished = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
 
-            if (string.IsNullOrWhiteSpace(deviceId))
-                return null;
+            if (!isLinkEstablished)
+                throw new PlcConnectionFailedException($"Device '{deviceId}' link is not established. Please ensure PLC program is running and has initialized the link.");
 
-            if (!_registry.TryGetManager(deviceId, out var manager))
-                return null;
+            // Check for error alarm
+            var errorAlarmAddress = PlcAddress.Parse(config.SignalMap.ErrorAlarm);
+            var hasAlarm = await client.ReadAsync<bool>(errorAlarmAddress, cancellationToken).ConfigureAwait(false);
 
-            var client = manager!.Client;
-            var config = manager.Options;
+            if (hasAlarm)
+                return DeviceStatus.Error;
 
-            var isConnected = manager.IsConnected;
-            var isLinkEstablished = false;
-            var isReady = false;
-            Location? currentLocation = null;
-
-            // Only check PLC status if connected
-            if (isConnected)
-            {
-                try
-                {
-                    isLinkEstablished = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
-                    
-                    if (isLinkEstablished)
-                    {
-                        isReady = await client.IsDeviceReadyAsync(cancellationToken).ConfigureAwait(false);
-                        currentLocation = await _orchestrator.GetDeviceCurrentLocationAsync(deviceId, cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                catch
-                {
-                    // If any PLC read fails, status remains false/null
-                }
-            }
-
+            // Check if device is executing a command
             var currentCommandId = _orchestrator.GetDeviceActiveCommand(deviceId)?.CommandId;
+            if (!string.IsNullOrEmpty(currentCommandId))
+                return DeviceStatus.Busy;
 
-            return new DeviceStatus
-            {
-                DeviceId = deviceId,
-                IsConnected = isConnected,
-                IsLinkEstablished = isLinkEstablished,
-                IsReady = isReady,
-                CurrentCommandId = currentCommandId,
-                CurrentLocation = currentLocation,
-                Capabilities = config.Capabilities,
-                Timestamp = DateTimeOffset.UtcNow
-            };
-        }, cancellationToken);
+            // Check if device is ready
+            var isReady = await client.IsDeviceReadyAsync(cancellationToken).ConfigureAwait(false);
+
+            return isReady ? DeviceStatus.Idle : DeviceStatus.Error;
+        }
+        catch (PlcConnectionFailedException)
+        {
+            throw; // Re-throw connection exceptions
+        }
+        catch
+        {
+            // If any PLC read fails, throw offline exception
+            throw new PlcConnectionFailedException($"Device '{deviceId}' is not responding. Please check the connection and try again.");
+        }
     }
 
     /// <summary>
@@ -266,6 +272,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Array of device statuses.</returns>
+    /// <exception cref="PlcConnectionFailedException">Thrown when any device is offline or link is not established.</exception>
     public Task<DeviceStatus[]> GetAllDeviceStatusAsync(CancellationToken cancellationToken = default)
     {
         return Task.Run(async () =>
@@ -278,10 +285,7 @@ public sealed class AutomationGateway : IAsyncDisposable
             foreach (var deviceId in deviceIds)
             {
                 var status = await GetDeviceStatusAsync(deviceId, cancellationToken).ConfigureAwait(false);
-                if (status != null)
-                {
-                    statuses.Add(status);
-                }
+                statuses.Add(status);
             }
 
             return statuses.ToArray();
@@ -376,9 +380,6 @@ public sealed class AutomationGateway : IAsyncDisposable
                 throw new InvalidOperationException("Gateway must be initialized before stopping devices.");
 
             await _registry.DisconnectDeviceAsync(deviceId).ConfigureAwait(false);
-
-            // Orchestrator will handle disconnected devices automatically
-            // Commands targeting this device will fail with "device not ready" errors
         });
     }
 
@@ -397,7 +398,6 @@ public sealed class AutomationGateway : IAsyncDisposable
     }
 
     #region Command Queue Orchestration
-
 
     public Task SendCommand(TransportTask task)
     {
@@ -517,8 +517,6 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <param name="destinationLocation">Destination location for inbound material (required if isValid = true).</param>
     /// <param name="gateNumber">Gate number for inbound operation (required if isValid = true).</param>
     /// <param name="direction">Optional enter direction for material flow.</param>
-    /// <param name="exitDirection">Optional exit direction for material flow.</param>
-    /// <param name="reason">Optional reason for rejection (useful for logging/audit if isValid = false).</param>
     /// <returns>True if response was accepted, false if validation already completed/timeout.</returns>
     public Task<bool> SendValidationResult(
         string taskId,
@@ -568,17 +566,26 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <param name="deviceId">The device ID to recover.</param>
     /// <returns>True if the device exists and recovery trigger was sent; otherwise false.</returns>
     /// <exception cref="ObjectDisposedException">Thrown when the gateway has been disposed.</exception>
-    /// <exception cref="InvalidOperationException">Thrown when the gateway is not initialized.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when the gateway is not initialized or device is currently executing a command.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, offline, or link is not established.</exception>
     public Task<bool> ResetDeviceStatusAsync(string deviceId)
     {
-        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        return Task.Run(async () =>
+        {
+            ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-        if (!_isInitialized)
-            throw new InvalidOperationException("Gateway must be initialized before recovering devices.");
+            if (!_isInitialized)
+                throw new InvalidOperationException("Gateway must be initialized before recovering devices.");
 
-        ValidateDeviceId(deviceId);
+            ValidateDeviceId(deviceId);
 
-        return Task.FromResult(_orchestrator.TriggerDeviceRecovery(deviceId));
+            var deviceStatus = await GetDeviceStatusAsync(deviceId).ConfigureAwait(false);
+
+            if (deviceStatus == DeviceStatus.Busy)
+                throw new InvalidOperationException($"Cannot reset device '{deviceId}' while it is executing a command. Wait for command completion or use manual intervention.");
+
+            return _orchestrator.TriggerDeviceRecovery(deviceId);
+        });
     }
 
     /// <summary>
@@ -634,6 +641,21 @@ public sealed class AutomationGateway : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         var commands = _orchestrator.GetPendingCommands();
+        return [.. commands.Select(c => new TransportTask
+        {
+            TaskId = c.CommandId,
+            DeviceId = c.PlcDeviceId,
+            CommandType = c.CommandType,
+            SourceLocation = c.SourceLocation,
+            TargetLocation = c.DestinationLocation,
+            GateNumber = c.GateNumber
+        })];
+    }
+
+    public TransportTask[] GetProccessingTask()
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        var commands = _orchestrator.GetProcessingCommands();
         return [.. commands.Select(c => new TransportTask
         {
             TaskId = c.CommandId,

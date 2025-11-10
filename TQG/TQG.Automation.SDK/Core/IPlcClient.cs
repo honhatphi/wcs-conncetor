@@ -12,7 +12,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>A task representing the connection attempt.</returns>
     /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when connection fails.</exception>
-    /// <exception cref="Exceptions.PlcTimeoutException">Thrown when connection times out.</exception>
+    /// <exception cref="Exceptions.TimeoutException">Thrown when connection times out.</exception>
     Task ConnectAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -30,7 +30,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// <returns>The value read from the PLC.</returns>
     /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected.</exception>
     /// <exception cref="Exceptions.PlcInvalidAddressException">Thrown when address is invalid.</exception>
-    /// <exception cref="Exceptions.PlcTimeoutException">Thrown when operation times out.</exception>
+    /// <exception cref="Exceptions.TimeoutException">Thrown when operation times out.</exception>
     /// <exception cref="Exceptions.PlcDataFormatException">Thrown when data type mismatch occurs.</exception>
     Task<T> ReadAsync<T>(PlcAddress address, CancellationToken cancellationToken = default);
 
@@ -44,7 +44,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// <returns>A task representing the write operation.</returns>
     /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected.</exception>
     /// <exception cref="Exceptions.PlcInvalidAddressException">Thrown when address is invalid.</exception>
-    /// <exception cref="Exceptions.PlcTimeoutException">Thrown when operation times out.</exception>
+    /// <exception cref="Exceptions.TimeoutException">Thrown when operation times out.</exception>
     /// <exception cref="Exceptions.PlcDataFormatException">Thrown when data type mismatch occurs.</exception>
     Task WriteAsync<T>(PlcAddress address, T value, CancellationToken cancellationToken = default);
 
