@@ -1,11 +1,11 @@
 namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
-/// Response from user for barcode validation.
-/// User must call RespondToBarcodeValidation() within timeout period (2 minutes).
-/// If IsValid = true, must provide DestinationLocation and other parameters for INBOUND execution.
+/// Response model for barcode validation.
+/// User must call RespondToBarcodeValidation() within timeout period (5 minutes).
+/// If IsValid = true, must provide DestinationLocation and GateNumber.
 /// </summary>
-public sealed record BarcodeValidationResponse
+public sealed class BarcodeValidationResponse
 {
     /// <summary>
     /// Command ID being validated.

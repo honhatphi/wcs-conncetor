@@ -181,7 +181,7 @@ internal sealed class InboundExecutor(
 
     /// <summary>
     /// Validates barcode with user via callback.
-    /// Requests validation and waits for user response (max 2 minutes).
+    /// Requests validation and waits for user response (max 5 minutes).
     /// Returns validation response with approval/rejection and parameters.
     /// </summary>
     private async Task<BarcodeValidationResponse> ValidateBarcodeAsync(
@@ -203,7 +203,7 @@ internal sealed class InboundExecutor(
 
         steps.Add($"Barcode read: {barcode}");
 
-        // Request barcode validation from user (2 minute timeout)
+        // Request barcode validation from user (5 minute timeout)
         var validationRequest = new BarcodeReceivedEventArgs
         {
             TaskId = command.CommandId,

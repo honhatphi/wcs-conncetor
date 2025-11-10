@@ -51,7 +51,7 @@ public sealed class AutomationGateway : IAsyncDisposable
 
     /// <summary>
     /// Event raised when a barcode is read from PLC during INBOUND operation and requires validation.
-    /// Subscriber must call RespondToBarcodeValidation() within 2 minutes, or command will be rejected.
+    /// Subscriber must call RespondToBarcodeValidation() within 5 minutes, or command will be rejected.
     /// </summary>
     public event EventHandler<BarcodeReceivedEventArgs>? BarcodeReceived;
 
@@ -588,7 +588,7 @@ public sealed class AutomationGateway : IAsyncDisposable
 
     /// <summary>
     /// Responds to a barcode validation request for an INBOUND command.
-    /// Must be called within 2 minutes of BarcodeValidationRequested event, or command will auto-reject.
+    /// Must be called within 5 minutes of BarcodeValidationRequested event, or command will auto-reject.
     /// If accepting (isValid = true), must provide destinationLocation and gateNumber.
     /// </summary>
     /// <param name="taskId">Command ID from BarcodeValidationRequestedEventArgs.</param>
@@ -813,7 +813,7 @@ public sealed class AutomationGateway : IAsyncDisposable
 
     /// <summary>
     /// Internal method for InboundExecutor to request barcode validation.
-    /// Raises BarcodeValidationRequested event and waits for user response (max 2 minutes).
+    /// Raises BarcodeValidationRequested event and waits for user response (max 5 minutes).
     /// </summary>
     private async Task<BarcodeValidationResponse> RequestBarcodeValidationAsync(
         BarcodeReceivedEventArgs eventArgs,
