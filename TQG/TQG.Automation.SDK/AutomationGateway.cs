@@ -451,11 +451,11 @@ public sealed class AutomationGateway : IAsyncDisposable
 
     #region Command Queue Orchestration
 
-    public Task SendCommand(TransportTask task)
+    public Task<SubmissionResult> SendCommand(TransportTask task)
     {
         _logger.LogInformation($"SendCommand called - TaskId: {task?.TaskId}, CommandType: {task?.CommandType}");
         ArgumentNullException.ThrowIfNull(task);
-
+    
         return SendMultipleCommands([task]);
     }
 
