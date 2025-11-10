@@ -4,6 +4,7 @@ using TQG.Automation.SDK.Configuration;
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Exceptions;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Management;
 using TQG.Automation.SDK.Orchestration.Core;
 using TQG.Automation.SDK.Orchestration.Models;
@@ -22,6 +23,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     private readonly PlcRegistry _registry;
     private readonly CommandOrchestrator _orchestrator;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<BarcodeValidationResponse>> _pendingBarcodeValidations = new();
+    private readonly ILogger _logger;
     private CancellationTokenSource? _eventLoopCts;
     private Task? _eventLoopTask;
     private bool _isDisposed;
@@ -66,6 +68,8 @@ public sealed class AutomationGateway : IAsyncDisposable
     {
         _registry = new PlcRegistry();
         _orchestrator = new CommandOrchestrator();
+        _logger = new FileLogger("AutomationGateway", LoggerConfiguration.Default);
+        _logger.LogInformation("=== AutomationGateway Instance Created ===");
     }
 
     /// <summary>
@@ -94,13 +98,16 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="PlcConnectionFailedException">Thrown when any device fails to initialize.</exception>
     public void Initialize(IEnumerable<PlcConnectionOptions> configurations)
     {
+        _logger.LogInformation("Initialize(IEnumerable<PlcConnectionOptions>) called");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         ArgumentNullException.ThrowIfNull(configurations);
 
         var configList = configurations.ToList();
+        _logger.LogInformation($"Initializing {configList.Count} devices from configuration");
         ValidateConfigurations(configList);
 
         InitializeCore(configList);
+        _logger.LogInformation($"Successfully initialized {configList.Count} devices");
     }
 
     /// <summary>
@@ -115,6 +122,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="PlcConnectionFailedException">Thrown when any device fails to initialize.</exception>
     public void Initialize(string configurations)
     {
+        _logger.LogInformation("Initialize(string) called - Loading from JSON");
         var config = LoadAndValidateConfiguration(configurations);
         InitializeCore(config.PlcConnections);
     }
@@ -128,16 +136,22 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="ArgumentException">Thrown when JSON is invalid or validation fails.</exception>
     public void LoadWarehouseLayout(string layoutJson)
     {
+        _logger.LogInformation("LoadWarehouseLayout called");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         ArgumentNullException.ThrowIfNull(layoutJson);
 
         _warehouseLayout = WarehouseLayout.LoadFromJson(layoutJson);
+        _logger.LogInformation("Warehouse layout loaded successfully");
     }
 
     /// <summary>
     /// Gets the current warehouse layout configuration.
     /// </summary>
-    public WarehouseLayout GetWarehouseLayout() => _warehouseLayout;
+    public WarehouseLayout GetWarehouseLayout()
+    {
+        _logger.LogDebug("GetWarehouseLayout called");
+        return _warehouseLayout;
+    }
 
     /// <summary>
     /// Switches the connection mode for a specific device (Real ↔ Emulated).
@@ -152,6 +166,7 @@ public sealed class AutomationGateway : IAsyncDisposable
         PlcMode newMode,
         CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation($"SwitchModeAsync called - DeviceId: {deviceId}, NewMode: {newMode}");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         ValidateDeviceId(deviceId);
 
@@ -160,7 +175,10 @@ public sealed class AutomationGateway : IAsyncDisposable
 
         // Check if mode is already set
         if (oldOptions.Mode == newMode)
+        {
+            _logger.LogInformation($"Device {deviceId} already in {newMode} mode - no action needed");
             return;
+        }
 
         // Disconnect old connection
         await oldManager.DisconnectAsync().ConfigureAwait(false);
@@ -180,6 +198,8 @@ public sealed class AutomationGateway : IAsyncDisposable
 
         // Dispose old manager
         await replacedManager.DisposeAsync().ConfigureAwait(false);
+        
+        _logger.LogInformation($"Device {deviceId} successfully switched from {oldOptions.Mode} to {newMode}");
     }
 
     /// <summary>
@@ -189,6 +209,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <returns>True if connected; otherwise false.</returns>
     public bool IsConnected(string deviceId)
     {
+        _logger.LogDebug($"IsConnected called - DeviceId: {deviceId}");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         if (string.IsNullOrWhiteSpace(deviceId))
@@ -212,59 +233,72 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <returns>Device status enum.</returns>
     /// <exception cref="ArgumentException">Thrown when deviceId is null or empty.</exception>
     /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, offline, or link is not established.</exception>
-    public async Task<DeviceStatus> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
+    public Task<DeviceStatus> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_isDisposed, this);
-
-        if (string.IsNullOrWhiteSpace(deviceId))
-            throw new ArgumentException("Device ID cannot be null or empty.", nameof(deviceId));
-
-        if (!_registry.TryGetManager(deviceId, out var manager))
-            throw new PlcConnectionFailedException($"Device '{deviceId}' not found. Please ensure the device is registered.");
-
-        var client = manager!.Client;
-        var config = manager.Options;
-
-        var isConnected = manager.IsConnected;
-
-        // If not connected, throw exception
-        if (!isConnected)
-            throw new PlcConnectionFailedException($"Device '{deviceId}' is offline. Please connect the device using ActivateDevice() before checking status.");
-
-        try
+        _logger.LogDebug($"GetDeviceStatusAsync called - DeviceId: {deviceId}");
+        return Task.Run(async () =>
         {
-            // Check if link is established
-            var isLinkEstablished = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
+             ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-            if (!isLinkEstablished)
-                throw new PlcConnectionFailedException($"Device '{deviceId}' link is not established. Please ensure PLC program is running and has initialized the link.");
+             if (string.IsNullOrWhiteSpace(deviceId))
+                 throw new ArgumentException("Device ID cannot be null or empty.", nameof(deviceId));
 
-            // Check for error alarm
-            var errorAlarmAddress = PlcAddress.Parse(config.SignalMap.ErrorAlarm);
-            var hasAlarm = await client.ReadAsync<bool>(errorAlarmAddress, cancellationToken).ConfigureAwait(false);
+             if (!_registry.TryGetManager(deviceId, out var manager))
+                 throw new PlcConnectionFailedException($"Device '{deviceId}' not found. Please ensure the device is registered.");
 
-            if (hasAlarm)
-                return DeviceStatus.Error;
+             var client = manager!.Client;
+             var config = manager.Options;
 
-            // Check if device is executing a command
-            var currentCommandId = _orchestrator.GetDeviceActiveCommand(deviceId)?.CommandId;
-            if (!string.IsNullOrEmpty(currentCommandId))
-                return DeviceStatus.Busy;
+             var isConnected = manager.IsConnected;
 
-            // Check if device is ready
-            var isReady = await client.IsDeviceReadyAsync(cancellationToken).ConfigureAwait(false);
+             // If not connected, throw exception
+             if (!isConnected)
+                 throw new PlcConnectionFailedException($"Device '{deviceId}' is offline. Please connect the device using ActivateDevice() before checking status.");
 
-            return isReady ? DeviceStatus.Idle : DeviceStatus.Error;
-        }
-        catch (PlcConnectionFailedException)
-        {
-            throw; // Re-throw connection exceptions
-        }
-        catch
-        {
-            // If any PLC read fails, throw offline exception
-            throw new PlcConnectionFailedException($"Device '{deviceId}' is not responding. Please check the connection and try again.");
-        }
+             try
+             {
+                 // Check if link is established
+                 var isLinkEstablished = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
+
+                 if (!isLinkEstablished)
+                     throw new PlcConnectionFailedException($"Device '{deviceId}' link is not established. Please ensure PLC program is running and has initialized the link.");
+
+                 // Check for error alarm
+                 var errorAlarmAddress = PlcAddress.Parse(config.SignalMap.ErrorAlarm);
+                 var hasAlarm = await client.ReadAsync<bool>(errorAlarmAddress, cancellationToken).ConfigureAwait(false);
+
+                 if (hasAlarm)
+                 {
+                     _logger.LogWarning($"Device {deviceId} status: Error (ErrorAlarm = true)");
+                     return DeviceStatus.Error;
+                 }
+
+                 // Check if device is executing a command
+                 var currentCommandId = _orchestrator.GetDeviceActiveCommand(deviceId)?.CommandId;
+                 if (!string.IsNullOrEmpty(currentCommandId))
+                 {
+                     _logger.LogDebug($"Device {deviceId} status: Busy (CommandId: {currentCommandId})");
+                     return DeviceStatus.Busy;
+                 }
+
+                 // Check if device is ready
+                 var isReady = await client.IsDeviceReadyAsync(cancellationToken).ConfigureAwait(false);
+
+                 var status = isReady ? DeviceStatus.Idle : DeviceStatus.Error;
+                 _logger.LogDebug($"Device {deviceId} status: {status}");
+                 return status;
+             }
+             catch (PlcConnectionFailedException)
+             {
+                 throw; // Re-throw connection exceptions
+             }
+             catch
+             {
+                 // If any PLC read fails, throw offline exception
+                 throw new PlcConnectionFailedException($"Device '{deviceId}' is not responding. Please check the connection and try again.");
+             }
+         });
+
     }
 
     /// <summary>
@@ -301,6 +335,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, connection fails, or link not established.</exception>
     public Task ActivateDevice(string deviceId, CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation($"ActivateDevice called - DeviceId: {deviceId}");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -315,6 +350,7 @@ public sealed class AutomationGateway : IAsyncDisposable
 
             // Step 1: Physical connection
             await manager.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation($"Device {deviceId} physically connected");
 
             // Step 2: Verify DLL is linked to PLC program
             var isLinked = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
@@ -322,11 +358,14 @@ public sealed class AutomationGateway : IAsyncDisposable
             {
                 // Disconnect on link failure
                 await manager.DisconnectAsync().ConfigureAwait(false);
-
+                
+                _logger.LogError($"Device {deviceId} link not established with PLC");
                 throw new PlcConnectionFailedException(
                     $"Link not established: PLC program has not set SoftwareConnected flag for {deviceId}. " +
                     $"Ensure PLC program is running and has initialized the link.");
             }
+            
+            _logger.LogInformation($"Device {deviceId} activated successfully");
         }, cancellationToken);
     }
 
@@ -337,6 +376,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <returns>True if all devices activated successfully; false if any device failed.</returns>
     public Task<bool> ActivateAllDevicesAsync(CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation("ActivateAllDevicesAsync called");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -345,20 +385,25 @@ public sealed class AutomationGateway : IAsyncDisposable
                 throw new InvalidOperationException("Gateway must be initialized before starting devices.");
 
             var allDeviceIds = _registry.DeviceIds.ToList();
+            _logger.LogInformation($"Activating {allDeviceIds.Count} devices");
 
             // Start all devices with link verification
+            var successCount = 0;
             foreach (var deviceId in allDeviceIds)
             {
                 try
                 {
                     await ActivateDevice(deviceId, cancellationToken).ConfigureAwait(false);
+                    successCount++;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _logger.LogError($"Failed to activate device {deviceId}: {ex.Message}", ex);
                     return false; // Any failure returns false
                 }
             }
 
+            _logger.LogInformation($"All {successCount} devices activated successfully");
             return true; // All succeeded
         }, cancellationToken);
     }
@@ -371,6 +416,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="PlcConnectionFailedException">Thrown when device is not found.</exception>
     public Task DeactivateDevice(string deviceId)
     {
+        _logger.LogInformation($"DeactivateDevice called - DeviceId: {deviceId}");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -380,6 +426,7 @@ public sealed class AutomationGateway : IAsyncDisposable
                 throw new InvalidOperationException("Gateway must be initialized before stopping devices.");
 
             await _registry.DisconnectDeviceAsync(deviceId).ConfigureAwait(false);
+            _logger.LogInformation($"Device {deviceId} deactivated successfully");
         });
     }
 
@@ -388,12 +435,17 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// </summary>
     public Task DeactivateAllDevicesAsync()
     {
+        _logger.LogInformation("DeactivateAllDevicesAsync called");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
             if (!_isInitialized)
+            {
+                _logger.LogWarning("DeactivateAllDevicesAsync called but gateway not initialized");
                 return;
+            }
             await _registry.DisconnectAllAsync().ConfigureAwait(false);
+            _logger.LogInformation("All devices deactivated successfully");
         });
     }
 
@@ -401,6 +453,7 @@ public sealed class AutomationGateway : IAsyncDisposable
 
     public Task SendCommand(TransportTask task)
     {
+        _logger.LogInformation($"SendCommand called - TaskId: {task?.TaskId}, CommandType: {task?.CommandType}");
         ArgumentNullException.ThrowIfNull(task);
 
         return SendMultipleCommands([task]);
@@ -419,6 +472,7 @@ public sealed class AutomationGateway : IAsyncDisposable
         IEnumerable<TransportTask> requests,
         CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation("SendMultipleCommands called");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -428,6 +482,8 @@ public sealed class AutomationGateway : IAsyncDisposable
             ArgumentNullException.ThrowIfNull(requests);
 
             var requestList = requests.ToList();
+            _logger.LogInformation($"Processing {requestList.Count} commands");
+            
             if (requestList.Count == 0)
             {
                 return new SubmissionResult
@@ -447,6 +503,7 @@ public sealed class AutomationGateway : IAsyncDisposable
                 var validationError = ValidateCommandRequest(request);
                 if (validationError != null)
                 {
+                    _logger.LogWarning($"Command validation failed - TaskId: {request.TaskId}, Reason: {validationError}");
                     rejected.Add(new RejectCommand(request, validationError));
                     continue;
                 }
@@ -458,11 +515,19 @@ public sealed class AutomationGateway : IAsyncDisposable
                     .ConfigureAwait(false);
 
                 if (success)
+                {
+                    _logger.LogInformation($"Command submitted to queue - TaskId: {request.TaskId}, CommandType: {request.CommandType}, DeviceId: {request.DeviceId ?? "Auto-assign"}");
                     submitted++;
+                }
                 else
+                {
+                    _logger.LogWarning($"Command submission failed - TaskId: {request.TaskId}");
                     rejected.Add(new RejectCommand(request, "Submission failed"));
+                }
             }
 
+            _logger.LogInformation($"Command submission complete - Submitted: {submitted}, Rejected: {rejected.Count}");
+            
             return new SubmissionResult
             {
                 Submitted = submitted,
@@ -477,8 +542,10 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// </summary>
     public void PauseQueue()
     {
+        _logger.LogInformation("PauseQueue called");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         _orchestrator.PauseScheduling();
+        _logger.LogInformation("Command queue paused");
     }
 
     /// <summary>
@@ -486,8 +553,10 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// </summary>
     public void ResumeQueue()
     {
+        _logger.LogInformation("ResumeQueue called");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         _orchestrator.ResumeScheduling();
+        _logger.LogInformation("Command queue resumed");
     }
 
     /// <summary>
@@ -503,8 +572,18 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <returns>True if command was pending and removed, false otherwise.</returns>
     public bool RemoveCommand(string commandId)
     {
+        _logger.LogInformation($"RemoveCommand called - CommandId: {commandId}");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
-        return _orchestrator.RemoveCommand(commandId);
+        var removed = _orchestrator.RemoveCommand(commandId);
+        if (removed)
+        {
+            _logger.LogInformation($"Command removed from queue - CommandId: {commandId}");
+        }
+        else
+        {
+            _logger.LogWarning($"Command not found or already executing - CommandId: {commandId}");
+        }
+        return removed;
     }
 
     /// <summary>
@@ -525,6 +604,7 @@ public sealed class AutomationGateway : IAsyncDisposable
         Direction? direction = null,
         int? gateNumber = null)
     {
+        _logger.LogInformation($"SendValidationResult called - TaskId: {taskId}, IsValid: {isValid}, Destination: {destinationLocation}, GateNumber: {gateNumber}");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         if (string.IsNullOrWhiteSpace(taskId))
@@ -552,9 +632,11 @@ public sealed class AutomationGateway : IAsyncDisposable
             };
 
             tcs.TrySetResult(response);
+            _logger.LogInformation($"Barcode validation response sent - TaskId: {taskId}, Result: {(isValid ? "Accepted" : "Rejected")}");
             return Task.FromResult(true);
         }
 
+        _logger.LogWarning($"Barcode validation already completed or timeout - TaskId: {taskId}");
         return Task.FromResult(false); // Already completed or timeout
     }
 
@@ -570,6 +652,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, offline, or link is not established.</exception>
     public Task<bool> ResetDeviceStatusAsync(string deviceId)
     {
+        _logger.LogInformation($"ResetDeviceStatusAsync called - DeviceId: {deviceId}");
         return Task.Run(async () =>
         {
             ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -582,9 +665,21 @@ public sealed class AutomationGateway : IAsyncDisposable
             var deviceStatus = await GetDeviceStatusAsync(deviceId).ConfigureAwait(false);
 
             if (deviceStatus == DeviceStatus.Busy)
+            {
+                _logger.LogWarning($"Cannot reset device {deviceId} - device is busy");
                 throw new InvalidOperationException($"Cannot reset device '{deviceId}' while it is executing a command. Wait for command completion or use manual intervention.");
+            }
 
-            return _orchestrator.TriggerDeviceRecovery(deviceId);
+            var result = _orchestrator.TriggerDeviceRecovery(deviceId);
+            if (result)
+            {
+                _logger.LogInformation($"Device {deviceId} recovery triggered successfully");
+            }
+            else
+            {
+                _logger.LogWarning($"Device {deviceId} recovery trigger failed");
+            }
+            return result;
         });
     }
 
@@ -597,6 +692,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <returns>Current location or null if not found.</returns>
     public Task<Location?> GetActualLocationAsync(string deviceId, CancellationToken cancellationToken = default)
     {
+        _logger.LogDebug($"GetActualLocationAsync called - DeviceId: {deviceId}");
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         return Task.Run(async () =>
@@ -687,6 +783,7 @@ public sealed class AutomationGateway : IAsyncDisposable
                         notification.PlcDeviceId,
                         notification.CommandId,
                         notification.PlcError);
+                    _logger.LogWarning($"EVENT: TaskAlarm raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}, ErrorCode: {notification.PlcError.ErrorCode}, ErrorMessage: {notification.PlcError.ErrorMessage}");
                     TaskAlarm?.Invoke(this, eventArgsAlarm);
                 }
                 return;
@@ -696,17 +793,20 @@ public sealed class AutomationGateway : IAsyncDisposable
             if (notification.Status == CommandStatus.Success)
             {
                 var eventArgsSuccess = new TaskSucceededEventArgs(notification.PlcDeviceId, notification.CommandId);
+                _logger.LogInformation($"EVENT: TaskSucceeded raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}");
                 TaskSucceeded?.Invoke(this, eventArgsSuccess);
             }
             else if (notification.Status == CommandStatus.Failed)
             {
                 var error = notification.PlcError ?? new ErrorDetail(-1, notification.Message ?? "Exception");
                 var eventArgsFailed = new TaskFailedEventArgs(notification.PlcDeviceId, notification.CommandId, error);
+                _logger.LogError($"EVENT: TaskFailed raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}, ErrorCode: {error.ErrorCode}, ErrorMessage: {error.ErrorMessage}");
                 TaskFailed?.Invoke(this, eventArgsFailed);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogError($"Exception in HandleResultNotification - TaskId: {notification.CommandId}", ex);
             // Suppress exceptions from event handlers to prevent disrupting the result stream
         }
     }
@@ -729,6 +829,7 @@ public sealed class AutomationGateway : IAsyncDisposable
         try
         {
             // Raise event to notify user
+            _logger.LogInformation($"EVENT: BarcodeReceived raised - TaskId: {eventArgs.TaskId}, DeviceId: {eventArgs.DeviceId}, Barcode: {eventArgs.Barcode}");
             BarcodeReceived?.Invoke(this, eventArgs);
 
             // Wait for response with 5 minute timeout
