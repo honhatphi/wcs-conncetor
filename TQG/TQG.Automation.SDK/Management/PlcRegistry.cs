@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using TQG.Automation.SDK.Exceptions;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Management;
 
@@ -72,7 +72,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
     /// <param name="deviceId">Device identifier.</param>
     /// <returns>The connection manager for the specified device.</returns>
     /// <exception cref="ArgumentNullException">Thrown when deviceId is null.</exception>
-    /// <exception cref="PlcConnectionException">Thrown when device ID is not found.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device ID is not found.</exception>
     public async Task<PlcConnectionManager> GetManagerAsync(string deviceId)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -83,7 +83,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
             if (_managers.TryGetValue(deviceId, out var manager))
                 return manager;
 
-            throw new PlcConnectionException($"Device '{deviceId}' not found in registry. Available devices: {string.Join(", ", _managers.Keys)}");
+            throw new PlcConnectionFailedException($"Device '{deviceId}' not found in registry. Available devices: {string.Join(", ", _managers.Keys)}");
         }).ConfigureAwait(false);
     }
 
@@ -127,7 +127,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
     /// <param name="deviceId">Device identifier.</param>
     /// <param name="newManager">New connection manager to replace with.</param>
     /// <returns>The old manager that was replaced.</returns>
-    /// <exception cref="PlcConnectionException">Thrown when device ID is not found.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device ID is not found.</exception>
     public async Task<PlcConnectionManager> ReplaceAsync(string deviceId, PlcConnectionManager newManager)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -142,7 +142,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
                     return oldManager;
             }
 
-            throw new PlcConnectionException($"Failed to replace manager for device '{deviceId}'. Device may not be registered.");
+            throw new PlcConnectionFailedException($"Failed to replace manager for device '{deviceId}'. Device may not be registered.");
         }).ConfigureAwait(false);
     }
 
@@ -151,7 +151,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <exception cref="PlcConnectionException">Thrown when device is not found or connection fails.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found or connection fails.</exception>
     public async Task ConnectDeviceAsync(string deviceId, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -165,7 +165,7 @@ internal sealed class PlcRegistry : IAsyncDisposable
     /// Disconnects a specific device and halts health monitoring.
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
-    /// <exception cref="PlcConnectionException">Thrown when device is not found.</exception>
+    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found.</exception>
     public async Task DisconnectDeviceAsync(string deviceId)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);

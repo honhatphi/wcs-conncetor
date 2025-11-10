@@ -3,12 +3,12 @@ namespace TQG.Automation.SDK.Exceptions;
 /// <summary>
 /// Exception thrown when a PLC connection fails or is lost.
 /// </summary>
-public class PlcConnectionException : PlcException
+public class PlcConnectionFailedException : PlcException
 {
     /// <summary>
     /// Initializes a new instance of the PlcConnectionException class.
     /// </summary>
-    public PlcConnectionException()
+    public PlcConnectionFailedException()
     {
     }
 
@@ -16,7 +16,7 @@ public class PlcConnectionException : PlcException
     /// Initializes a new instance of the PlcConnectionException class with a specified error message.
     /// </summary>
     /// <param name="message">The message that describes the error.</param>
-    public PlcConnectionException(string message) : base(message)
+    public PlcConnectionFailedException(string message) : base(message)
     {
     }
 
@@ -26,7 +26,7 @@ public class PlcConnectionException : PlcException
     /// </summary>
     /// <param name="message">The error message that explains the reason for the exception.</param>
     /// <param name="innerException">The exception that is the cause of the current exception.</param>
-    public PlcConnectionException(string message, Exception innerException) : base(message, innerException)
+    public PlcConnectionFailedException(string message, Exception innerException) : base(message, innerException)
     {
     }
 }

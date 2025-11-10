@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Public notification of command completion.
@@ -41,5 +41,5 @@ public sealed record CommandResultNotification
     /// PLC error information if an error/alarm was encountered during execution.
     /// Contains error code and descriptive message.
     /// </summary>
-    public PlcError? PlcError { get; init; }
+    public ErrorDetail? PlcError { get; init; }
 }

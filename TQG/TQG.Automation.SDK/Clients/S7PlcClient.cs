@@ -1,12 +1,12 @@
 using S7.Net;
 using System.Net.Sockets;
 using PlcException = TQG.Automation.SDK.Exceptions.PlcException;
-using PlcConnectionException = TQG.Automation.SDK.Exceptions.PlcConnectionException;
+using PlcConnectionException = TQG.Automation.SDK.Exceptions.PlcConnectionFailedException;
 using PlcTimeoutException = TQG.Automation.SDK.Exceptions.PlcTimeoutException;
 using PlcInvalidAddressException = TQG.Automation.SDK.Exceptions.PlcInvalidAddressException;
 using PlcDataFormatException = TQG.Automation.SDK.Exceptions.PlcDataFormatException;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Clients;
 

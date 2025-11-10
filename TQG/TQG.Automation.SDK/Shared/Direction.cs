@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Material flow direction for warehouse operations.

@@ -1,5 +1,5 @@
 namespace TQG.Automation.SDK.Orchestration.Models;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Result of command execution with detailed steps.
@@ -23,7 +23,7 @@ internal sealed record CommandExecutionResult
     /// <summary>
     /// PLC error information if an error/alarm was encountered.
     /// </summary>
-    public PlcError? PlcError { get; init; }
+    public ErrorDetail? PlcError { get; init; }
 
     public static CommandExecutionResult Success(string message, List<string> steps)
         => new() { Status = ExecutionStatus.Success, Message = message, ExecutionSteps = steps };
@@ -31,10 +31,10 @@ internal sealed record CommandExecutionResult
     public static CommandExecutionResult Warning(string message, List<string> steps)
         => new() { Status = ExecutionStatus.Warning, Message = message, ExecutionSteps = steps };
 
-    public static CommandExecutionResult Error(string message, List<string> steps, PlcError? plcError = null)
+    public static CommandExecutionResult Error(string message, List<string> steps, ErrorDetail? plcError = null)
         => new() { Status = ExecutionStatus.Error, Message = message, ExecutionSteps = steps, PlcError = plcError };
 
-    public static CommandExecutionResult Failed(string message, List<string> steps, PlcError? plcError = null)
+    public static CommandExecutionResult Failed(string message, List<string> steps, ErrorDetail? plcError = null)
         => new() { Status = ExecutionStatus.Failed, Message = message, ExecutionSteps = steps, PlcError = plcError };
 
     public static CommandExecutionResult Timeout(string message, List<string> steps)

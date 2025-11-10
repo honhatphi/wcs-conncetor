@@ -1,6 +1,8 @@
+using TQG.Automation.SDK.Clients;
+using System.Threading.Channels;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Executors;
 
@@ -9,11 +11,11 @@ namespace TQG.Automation.SDK.Orchestration.Executors;
 /// Moves material from one warehouse location to another via PLC.
 /// Simplified flow: Write Parameters (source + target + directions) → Trigger → Start Process → Wait for completion.
 /// </summary>
-internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap, bool stopOnAlarm)
+internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap, bool failOnAlarm)
 {
     private readonly IPlcClient _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
     private readonly SignalMap _signalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
-    private readonly bool _stopOnAlarm = stopOnAlarm;
+    private readonly bool _failOnAlarm = failOnAlarm;
 
     /// <summary>
     /// Executes a TRANSFER command: move material between warehouse locations.
@@ -21,6 +23,7 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
     /// </summary>
     public async Task<CommandExecutionResult> ExecuteAsync(
         CommandEnvelope command,
+        Channel<CommandResult> resultChannel,
         CancellationToken cancellationToken)
     {
         if (command.CommandType != CommandType.Transfer)
@@ -40,7 +43,7 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
             await StartProcessAsync(steps, cancellationToken).ConfigureAwait(false);
 
             // Step 4: Wait for result (CommandFailed or TransferCompleted)
-            var result = await WaitForCommandResultAsync(command, steps, cancellationToken).ConfigureAwait(false);
+            var result = await WaitForCommandResultAsync(command, resultChannel, steps, cancellationToken).ConfigureAwait(false);
 
             return result;
         }
@@ -128,12 +131,15 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
 
     /// <summary>
     /// Waits for command result by polling ErrorAlarm, CommandFailed and TransferCompleted flags.
-    /// Alarm behavior depends on StopOnAlarm configuration.
-    /// Reads and logs error code when alarm is detected.
-    /// Polling continues until cancellationToken is cancelled (timeout handled by caller).
+    /// Alarm handling:
+    /// 1. Always sends immediate Warning notification to resultChannel when alarm detected (only once to avoid duplicates)
+    /// 2. If failOnAlarm=true: returns Failed immediately after sending notification
+    /// 3. If failOnAlarm=false: continues waiting for CommandFailed or Completed
+    /// This prevents duplicate error notifications since errorCode may not be reset immediately.
     /// </summary>
     private async Task<CommandExecutionResult> WaitForCommandResultAsync(
         CommandEnvelope command,
+        Channel<CommandResult> resultChannel,
         List<string> steps,
         CancellationToken cancellationToken)
     {
@@ -144,7 +150,8 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
         var pollInterval = TimeSpan.FromMilliseconds(500);
         var startTime = DateTimeOffset.UtcNow;
         var alarmDetected = false;
-        PlcError? detectedError = null;
+        var alarmNotificationSent = false;
+        ErrorDetail? detectedError = null;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -165,17 +172,39 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
                 var errorMessage = PlcErrorCodeMapper.GetMessage(errorCode);
                 steps.Add($"Error Code: {errorCode} - {errorMessage}");
 
-                detectedError = new PlcError(errorCode, errorMessage, command.CommandId);
+                detectedError = new ErrorDetail(errorCode, errorMessage);
 
-                if (_stopOnAlarm)
+                // Send immediate alarm notification to result channel (only once)
+                if (!alarmNotificationSent)
                 {
-                    // Stop immediately on alarm
-                    return CommandExecutionResult.Error(
-                        $"Command stopped: {detectedError}",
+                    alarmNotificationSent = true;
+                    var alarmNotification = new CommandResult
+                    {
+                        CommandId = command.CommandId,
+                        PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+                        Status = ExecutionStatus.Error,
+                        Message = $"⚠️ Alarm detected during execution: {detectedError}",
+                        StartedAt = startTime,
+                        CompletedAt = DateTimeOffset.UtcNow,
+                        PlcError = detectedError
+                    };
+
+                    await resultChannel.Writer.WriteAsync(alarmNotification, cancellationToken)
+                        .ConfigureAwait(false);
+                    
+                    steps.Add("Sent alarm notification to result channel");
+                }
+
+                // If failOnAlarm is enabled, return Failed immediately
+                if (_failOnAlarm)
+                {
+                    return CommandExecutionResult.Failed(
+                        $"Command failed due to alarm (failOnAlarm=true): {detectedError}",
                         steps,
                         detectedError);
                 }
-                // Otherwise continue to wait for CommandFailed or Completed
+
+                // Otherwise continue waiting for Completed or Failed flag
             }
 
             // Check CommandFailed flag

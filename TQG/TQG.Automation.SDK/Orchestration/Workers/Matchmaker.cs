@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Workers;
 
@@ -14,6 +15,7 @@ internal sealed class Matchmaker
     private readonly OrchestratorChannels _channels;
     private readonly AsyncManualResetEvent _pauseGate;
     private readonly PendingCommandTracker _tracker;
+    private readonly Dictionary<string, DeviceCapabilities> _deviceCapabilities;
 
     /// <summary>
     /// Delay between dispatching commands to consecutive devices to stagger workload.
@@ -29,6 +31,19 @@ internal sealed class Matchmaker
         _channels = channels ?? throw new ArgumentNullException(nameof(channels));
         _pauseGate = pauseGate ?? throw new ArgumentNullException(nameof(pauseGate));
         _tracker = tracker ?? throw new ArgumentNullException(nameof(tracker));
+        _deviceCapabilities = new Dictionary<string, DeviceCapabilities>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Registers device capabilities for command matching.
+    /// Must be called before RunAsync() to enable capability-based filtering.
+    /// </summary>
+    public void RegisterDeviceCapabilities(string deviceId, DeviceCapabilities capabilities)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(deviceId);
+        ArgumentNullException.ThrowIfNull(capabilities);
+
+        _deviceCapabilities[deviceId] = capabilities;
     }
 
     /// <summary>
@@ -44,26 +59,25 @@ internal sealed class Matchmaker
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
+                await WaitIfPausedAsync(cancellationToken);
 
                 CollectPendingCommands(pendingCommands);
 
                 if (ShouldAutoPause(pendingCommands))
                 {
                     AutoPauseAndWait();
-                    await WaitForNewDataAsync(cancellationToken).ConfigureAwait(false);
+                    await WaitForNewDataAsync(cancellationToken);
                     continue;
                 }
 
                 if (HasAvailableDevices())
                 {
-                    await MatchCommandsToDevicesAsync(pendingCommands, cancellationToken)
-                        .ConfigureAwait(false);
+                    await MatchCommandsToDevicesAsync(pendingCommands, cancellationToken);
                 }
 
                 if (ShouldWaitForNewData(pendingCommands))
                 {
-                    await WaitForNewDataAsync(cancellationToken).ConfigureAwait(false);
+                    await WaitForNewDataAsync(cancellationToken);
                 }
             }
         }
@@ -84,7 +98,7 @@ internal sealed class Matchmaker
     /// </summary>
     private async Task WaitIfPausedAsync(CancellationToken cancellationToken)
     {
-        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _pauseGate.WaitAsync(cancellationToken);
     }
 
     /// <summary>
@@ -144,8 +158,8 @@ internal sealed class Matchmaker
             await Task.WhenAny(
                 _channels.InputChannel.Reader.WaitToReadAsync(cancellationToken).AsTask(),
                 _channels.AvailabilityChannel.Reader.WaitToReadAsync(cancellationToken).AsTask(),
-                Task.Delay(100, cancellationToken)
-            ).ConfigureAwait(false);
+                Task.Delay(1000, cancellationToken)
+            );
         }
         catch (OperationCanceledException)
         {
@@ -179,11 +193,9 @@ internal sealed class Matchmaker
     {
         var availableDevices = CollectAvailableDevices();
 
-        await ProcessCommandQueueAsync(pendingCommands, availableDevices, cancellationToken)
-            .ConfigureAwait(false);
+        await ProcessCommandQueueAsync(pendingCommands, availableDevices, cancellationToken);
 
-        await ReturnUnusedDevicesToPoolAsync(availableDevices, cancellationToken)
-            .ConfigureAwait(false);
+        await ReturnUnusedDevicesToPoolAsync(availableDevices, cancellationToken);
     }
 
     /// <summary>
@@ -258,8 +270,9 @@ internal sealed class Matchmaker
     /// <summary>
     /// Finds matching device for a command.
     /// Returns device ID and index if found, otherwise indicates no match.
+    /// Considers device capabilities when matching.
     /// </summary>
-    private static DeviceMatchResult TryFindMatchingDevice(
+    private DeviceMatchResult TryFindMatchingDevice(
         CommandEnvelope command,
         List<string> availableDevices)
     {
@@ -271,7 +284,16 @@ internal sealed class Matchmaker
 
             if (index >= 0)
             {
-                return new DeviceMatchResult(true, availableDevices[index], index);
+                string deviceId = availableDevices[index];
+                
+                // Check if device supports this command type
+                if (!DeviceSupportsCommand(deviceId, command.CommandType))
+                {
+                    // Device doesn't support this command type
+                    return DeviceMatchResult.NotFound;
+                }
+
+                return new DeviceMatchResult(true, deviceId, index);
             }
 
             // Required device not available
@@ -279,15 +301,35 @@ internal sealed class Matchmaker
         }
         else
         {
-            // Any-device command: use first available
-            if (availableDevices.Count > 0)
+            // Any-device command: find first available device that supports this command type
+            for (int i = 0; i < availableDevices.Count; i++)
             {
-                return new DeviceMatchResult(true, availableDevices[0], 0);
+                string deviceId = availableDevices[i];
+                
+                if (DeviceSupportsCommand(deviceId, command.CommandType))
+                {
+                    return new DeviceMatchResult(true, deviceId, i);
+                }
             }
 
-            // No device available
+            // No compatible device available
             return DeviceMatchResult.NotFound;
         }
+    }
+
+    /// <summary>
+    /// Checks if a device supports the specified command type based on its capabilities.
+    /// Returns true if capabilities are not registered (backward compatibility).
+    /// </summary>
+    private bool DeviceSupportsCommand(string deviceId, CommandType commandType)
+    {
+        // If capabilities are not registered, allow all commands (backward compatibility)
+        if (!_deviceCapabilities.TryGetValue(deviceId, out var capabilities))
+        {
+            return true;
+        }
+
+        return capabilities.SupportsCommandType(commandType);
     }
 
     /// <summary>

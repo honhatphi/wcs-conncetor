@@ -1,13 +1,14 @@
+using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Executors;
 
 /// <summary>
-/// Executes CHECK PALLET commands: verifies pallet existence at specified location.
-/// Flow: Write Parameters (including Depth) → Trigger → Start Process → Wait for Result (with Available/Unavailable check).
-/// Always stops on alarm regardless of stopOnAlarm setting.
+/// Executes CHECKPALLET commands: verifies pallet presence at a location.
+/// Flow: Trigger → Write Location → Start Process → Wait for Result.
+/// Always fails on alarm regardless of failOnAlarm setting.
 /// </summary>
 internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
 {
@@ -111,8 +112,8 @@ internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
     }
 
     /// <summary>
-    /// Waits for command result by polling ErrorAlarm, CommandFailed, PalletCheckCompleted, AvailablePallet, and UnavailablePallet flags.
-    /// Always stops on alarm for CheckPallet operations (ignores stopOnAlarm setting).
+    /// Waits for command result by polling ErrorAlarm, PalletAvailable, PalletUnavailable flags.
+    /// Always fails on alarm for CheckPallet operations (ignores failOnAlarm setting).
     /// Reads and logs error code when alarm is detected.
     /// Polling continues until cancellationToken is cancelled (timeout handled by caller).
     /// </summary>
@@ -148,10 +149,10 @@ internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
                 var errorMessage = PlcErrorCodeMapper.GetMessage(errorCode);
                 steps.Add($"Error Code: {errorCode} - {errorMessage}");
 
-                var plcError = new PlcError(errorCode, errorMessage, command.CommandId);
+                var plcError = new ErrorDetail(errorCode, errorMessage);
 
                 // Always stop on alarm for CheckPallet operations
-                return CommandExecutionResult.Error(
+                return CommandExecutionResult.Failed(
                     $"Check pallet stopped: {plcError}",
                     steps,
                     plcError);

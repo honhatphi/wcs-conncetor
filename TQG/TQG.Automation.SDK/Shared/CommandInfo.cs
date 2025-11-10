@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Public command tracking information.
@@ -44,7 +44,7 @@ public sealed record CommandInfo
     /// <summary>
     /// Gate number for Inbound/Outbound operations.
     /// </summary>
-    public int? GateNumber { get; init; }
+    public int GateNumber { get; init; }
 
     /// <summary>
     /// When the command was submitted.
@@ -80,7 +80,7 @@ public sealed record CommandInfo
     /// PLC error information if an error/alarm was encountered during execution.
     /// Contains error code and descriptive message.
     /// </summary>
-    public PlcError? PlcError { get; init; }
+    public ErrorDetail? PlcError { get; init; }
 
     /// <summary>
     /// Detailed execution steps.

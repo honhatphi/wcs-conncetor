@@ -1,8 +1,7 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Status codes for command execution results.
-/// Simplified to Success/Failed for external consumers.
 /// </summary>
 public enum CommandStatus
 {
@@ -18,9 +17,16 @@ public enum CommandStatus
     /// Command failed to complete.
     /// Includes:
     /// - PLC signaled CommandFailed flag
-    /// - Error during execution (e.g., connection issue, stopped on alarm when stopOnAlarm=true)
     /// - Command timeout
     /// - Command cancellation
     /// </summary>
-    Failed
+    Failed,
+
+    /// <summary>
+    /// Error/Alarm detected during execution (intermediate notification).
+    /// This is an informational status sent immediately when ErrorAlarm is detected.
+    /// The command may continue or fail depending on failOnAlarm configuration.
+    /// Final result will be Success, Failed, or another Error status.
+    /// </summary>
+    Error
 }

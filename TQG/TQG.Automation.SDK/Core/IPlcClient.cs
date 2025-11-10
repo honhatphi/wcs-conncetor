@@ -11,7 +11,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>A task representing the connection attempt.</returns>
-    /// <exception cref="Exceptions.PlcConnectionException">Thrown when connection fails.</exception>
+    /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when connection fails.</exception>
     /// <exception cref="Exceptions.PlcTimeoutException">Thrown when connection times out.</exception>
     Task ConnectAsync(CancellationToken cancellationToken = default);
 
@@ -28,7 +28,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// <param name="address">The PLC memory address to read from.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>The value read from the PLC.</returns>
-    /// <exception cref="Exceptions.PlcConnectionException">Thrown when not connected.</exception>
+    /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected.</exception>
     /// <exception cref="Exceptions.PlcInvalidAddressException">Thrown when address is invalid.</exception>
     /// <exception cref="Exceptions.PlcTimeoutException">Thrown when operation times out.</exception>
     /// <exception cref="Exceptions.PlcDataFormatException">Thrown when data type mismatch occurs.</exception>
@@ -42,7 +42,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// <param name="value">The value to write.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>A task representing the write operation.</returns>
-    /// <exception cref="Exceptions.PlcConnectionException">Thrown when not connected.</exception>
+    /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected.</exception>
     /// <exception cref="Exceptions.PlcInvalidAddressException">Thrown when address is invalid.</exception>
     /// <exception cref="Exceptions.PlcTimeoutException">Thrown when operation times out.</exception>
     /// <exception cref="Exceptions.PlcDataFormatException">Thrown when data type mismatch occurs.</exception>
@@ -54,7 +54,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>True if SoftwareConnected flag is set; otherwise false.</returns>
-    /// <exception cref="Exceptions.PlcConnectionException">Thrown when not connected or read operation fails.</exception>
+    /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected or read operation fails.</exception>
     Task<bool> IsLinkEstablishedAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -63,7 +63,7 @@ internal interface IPlcClient : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>True if DeviceReady flag is set; otherwise false.</returns>
-    /// <exception cref="Exceptions.PlcConnectionException">Thrown when not connected or read operation fails.</exception>
+    /// <exception cref="Exceptions.PlcConnectionFailedException">Thrown when not connected or read operation fails.</exception>
     Task<bool> IsDeviceReadyAsync(CancellationToken cancellationToken = default);
 
     /// <summary>

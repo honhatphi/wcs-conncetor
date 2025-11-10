@@ -1,7 +1,7 @@
 using System.Net;
 using TQG.Automation.SDK.Core;
 
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Immutable configuration for a PLC connection.
@@ -71,10 +71,10 @@ public sealed record PlcConnectionOptions
 
     /// <summary>
     /// Gets the alarm handling behavior during command execution.
-    /// When true, command stops immediately on ErrorAlarm.
-    /// When false, command continues until CommandFailed or Completed.
+    /// When true, command fails immediately when ErrorAlarm is detected.
+    /// When false, command continues until CommandFailed or Completed despite alarm.
     /// </summary>
-    public bool StopOnAlarm { get; init; } = false;
+    public bool FailOnAlarm { get; init; } = false;
 
     /// <summary>
     /// Gets the default command execution timeout.
@@ -96,6 +96,13 @@ public sealed record PlcConnectionOptions
     /// Default is 5 seconds.
     /// </summary>
     public TimeSpan RecoveryPollInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Gets the operational capabilities of the device.
+    /// Defines which command types (Inbound, Outbound, Transfer, CheckPallet) this device supports.
+    /// Default is all capabilities enabled.
+    /// </summary>
+    public DeviceCapabilities Capabilities { get; init; } = DeviceCapabilities.Default;
 
     /// <summary>
     /// Validates the configuration and throws if invalid.
@@ -147,5 +154,11 @@ public sealed record PlcConnectionOptions
             throw new ArgumentNullException(nameof(SignalMap), "SignalMap cannot be null.");
 
         SignalMap.Validate();
+
+        // Validate capabilities
+        if (Capabilities == null)
+            throw new ArgumentNullException(nameof(Capabilities), "Capabilities cannot be null.");
+
+        Capabilities.Validate();
     }
 }

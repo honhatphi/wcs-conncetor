@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Type of warehouse command operation.

@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Exceptions;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Clients;
 
@@ -85,7 +85,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         try
         {
             if (!IsConnected)
-                throw new PlcConnectionException($"Not connected to emulated PLC {_options.DeviceId}. Call ConnectAsync first.");
+                throw new PlcConnectionFailedException($"Not connected to emulated PLC {_options.DeviceId}. Call ConnectAsync first.");
 
             // Simulate read delay
             await Task.Delay(10, cancellationToken).ConfigureAwait(false);
@@ -123,7 +123,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         try
         {
             if (!IsConnected)
-                throw new PlcConnectionException($"Not connected to emulated PLC {_options.DeviceId}. Call ConnectAsync first.");
+                throw new PlcConnectionFailedException($"Not connected to emulated PLC {_options.DeviceId}. Call ConnectAsync first.");
 
             // Simulate write delay
             await Task.Delay(10, cancellationToken).ConfigureAwait(false);
@@ -280,7 +280,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         if (!IsConnected)
-            throw new PlcConnectionException($"Cannot check link status: not connected to {_options.DeviceId}.");
+            throw new PlcConnectionFailedException($"Cannot check link status: not connected to {_options.DeviceId}.");
 
         try
         {
@@ -293,7 +293,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         }
         catch (Exception ex) when (ex is not PlcException)
         {
-            throw new PlcConnectionException($"Failed to check link status for {_options.DeviceId}: {ex.Message}", ex);
+            throw new PlcConnectionFailedException($"Failed to check link status for {_options.DeviceId}: {ex.Message}", ex);
         }
     }
 
@@ -303,7 +303,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         if (!IsConnected)
-            throw new PlcConnectionException($"Cannot check device ready status: not connected to {_options.DeviceId}.");
+            throw new PlcConnectionFailedException($"Cannot check device ready status: not connected to {_options.DeviceId}.");
 
         try
         {
@@ -316,7 +316,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         }
         catch (Exception ex) when (ex is not PlcException)
         {
-            throw new PlcConnectionException($"Failed to check device ready status for {_options.DeviceId}: {ex.Message}", ex);
+            throw new PlcConnectionFailedException($"Failed to check device ready status for {_options.DeviceId}: {ex.Message}", ex);
         }
     }
 

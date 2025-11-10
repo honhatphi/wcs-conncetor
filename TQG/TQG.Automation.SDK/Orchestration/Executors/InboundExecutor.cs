@@ -1,6 +1,9 @@
+using System.Threading.Channels;
+using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Executors;
 
@@ -11,13 +14,13 @@ namespace TQG.Automation.SDK.Orchestration.Executors;
 internal sealed class InboundExecutor(
     IPlcClient plcClient,
     SignalMap signalMap,
-    bool stopOnAlarm,
-    Func<BarcodeValidationRequestedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
+    bool failOnAlarm,
+    Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
 {
     private readonly IPlcClient _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
     private readonly SignalMap _signalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
-    private readonly bool _stopOnAlarm = stopOnAlarm;
-    private readonly Func<BarcodeValidationRequestedEventArgs, CancellationToken, Task<BarcodeValidationResponse>>
+    private readonly bool _failOnAlarm = failOnAlarm;
+    private readonly Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>>
         _barcodeValidationCallback = barcodeValidationCallback ?? throw new ArgumentNullException(nameof(barcodeValidationCallback));
 
     /// <summary>
@@ -26,6 +29,7 @@ internal sealed class InboundExecutor(
     /// </summary>
     public async Task<CommandExecutionResult> ExecuteAsync(
         CommandEnvelope command,
+        Channel<CommandResult> resultChannel,
         CancellationToken cancellationToken)
     {
         if (command.CommandType != CommandType.Inbound)
@@ -54,9 +58,7 @@ internal sealed class InboundExecutor(
                 await WriteBarcodeValidationFlagsAsync(isValid: false, steps, cancellationToken)
                     .ConfigureAwait(false);
 
-                return CommandExecutionResult.Failed(
-                    $"Barcode rejected: {validationResponse.Reason ?? "Invalid barcode"}",
-                    steps);
+                return CommandExecutionResult.Failed($"Barcode rejected", steps);
             }
 
             await WriteBarcodeValidationFlagsAsync(isValid: true, steps, cancellationToken)
@@ -67,15 +69,15 @@ internal sealed class InboundExecutor(
                 validationResponse.DestinationLocation!,
                 validationResponse.GateNumber!.Value,
                 validationResponse.EnterDirection,
-                validationResponse.ExitDirection,
                 steps,
                 cancellationToken).ConfigureAwait(false);
 
-            // Step 6: Wait for result (CommandFailed or InboundCompleted)
+            // Step 7: Wait for result (CommandFailed or InboundCompleted)
             var result = await WaitForCommandResultAsync(
-                command.CommandId,
+                command,
                 validationResponse.GateNumber!.Value,
                 validationResponse.DestinationLocation!,
+                resultChannel,
                 steps,
                 cancellationToken).ConfigureAwait(false);
 
@@ -147,29 +149,26 @@ internal sealed class InboundExecutor(
             for (int i = 0; i < addresses.Length; i++)
             {
                 var charAddress = PlcAddress.Parse(addresses[i]);
-                var charValue = await _plcClient.ReadAsync<short>(charAddress, cancellationToken)
+                var charValue = await _plcClient.ReadAsync<string>(charAddress, cancellationToken)
                     .ConfigureAwait(false);
 
-                // Validate: each char should be a single digit (0-9)
-                if (charValue < 0 || charValue > 9)
+                if (charValue.Length != 1)
                 {
-                    steps.Add($"Invalid barcode character at position {i + 1}: {charValue} (expected 0-9)");
-                    // Return empty barcode to indicate invalid data
-                    return defaultBarcode;
+                    steps.Add($"Stopped at position {i + 1}: character has length {charValue.Length} ('{charValue}'). Using {i} characters collected.");
+                    break;
                 }
-
-                // Convert to single digit character
-                barcodeChars.Add(charValue.ToString());
+                
+                barcodeChars.Add(charValue);
             }
 
-            // Construct full barcode
+            // Construct barcode from collected characters
             var barcode = string.Join("", barcodeChars);
 
-            // Check if barcode is not default
-            if (barcode != defaultBarcode)
+            // Check if barcode is not default (has actual data)
+            if (barcode != defaultBarcode && !string.IsNullOrEmpty(barcode))
             {
                 var elapsed = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
-                steps.Add($"Barcode detected after {elapsed:F0}ms");
+                steps.Add($"Barcode detected after {elapsed:F0}ms: '{barcode}'");
                 return barcode;
             }
 
@@ -198,18 +197,17 @@ internal sealed class InboundExecutor(
             return new BarcodeValidationResponse
             {
                 CommandId = command.CommandId,
-                IsValid = false,
-                Reason = "No valid barcode detected"
+                IsValid = false
             };
         }
 
         steps.Add($"Barcode read: {barcode}");
 
         // Request barcode validation from user (2 minute timeout)
-        var validationRequest = new BarcodeValidationRequestedEventArgs
+        var validationRequest = new BarcodeReceivedEventArgs
         {
-            CommandId = command.CommandId,
-            PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+            TaskId = command.CommandId,
+            DeviceId = command.PlcDeviceId ?? "Unknown",
             Barcode = barcode
         };
 
@@ -218,7 +216,7 @@ internal sealed class InboundExecutor(
 
         if (!validationResponse.IsValid)
         {
-            steps.Add($"Barcode validation rejected: {validationResponse.Reason}");
+            steps.Add($"Barcode validation rejected.");
             return validationResponse;
         }
 
@@ -229,8 +227,7 @@ internal sealed class InboundExecutor(
             return new BarcodeValidationResponse
             {
                 CommandId = command.CommandId,
-                IsValid = false,
-                Reason = "Validation response missing DestinationLocation"
+                IsValid = false
             };
         }
 
@@ -240,8 +237,7 @@ internal sealed class InboundExecutor(
             return new BarcodeValidationResponse
             {
                 CommandId = command.CommandId,
-                IsValid = false,
-                Reason = "Validation response missing or invalid GateNumber"
+                IsValid = false
             };
         }
 
@@ -302,7 +298,6 @@ internal sealed class InboundExecutor(
         Location destinationLocation,
         int gateNumber,
         Direction? enterDirection,
-        Direction? exitDirection,
         List<string> steps,
         CancellationToken cancellationToken)
     {
@@ -324,14 +319,6 @@ internal sealed class InboundExecutor(
             $"Wrote gate number: {gateNumber}",
             cancellationToken).ConfigureAwait(false);
 
-        // Write exit direction (always write, false if not specified)
-        await _plcClient.WriteDirectionAsync(
-            _signalMap.ExitDirection,
-            exitDirection,
-            steps,
-            "exit",
-            cancellationToken).ConfigureAwait(false);
-
         // Write enter direction (always write, false if not specified)
         await _plcClient.WriteDirectionAsync(
             _signalMap.EnterDirection,
@@ -343,14 +330,17 @@ internal sealed class InboundExecutor(
 
     /// <summary>
     /// Waits for command result by polling ErrorAlarm, CommandFailed and InboundCompleted flags.
-    /// Alarm behavior depends on StopOnAlarm configuration.
-    /// Reads and logs error code when alarm is detected.
-    /// Polling continues until cancellationToken is cancelled (timeout handled by caller).
+    /// Alarm handling:
+    /// 1. Always sends immediate Warning notification to resultChannel when alarm detected (only once to avoid duplicates)
+    /// 2. If failOnAlarm=true: returns Failed immediately after sending notification
+    /// 3. If failOnAlarm=false: continues waiting for CommandFailed or Completed
+    /// This prevents duplicate error notifications since errorCode may not be reset immediately.
     /// </summary>
     private async Task<CommandExecutionResult> WaitForCommandResultAsync(
-        string commandId,
+        CommandEnvelope command,
         int gateNumber,
         Location destinationLocation,
+        Channel<CommandResult> resultChannel,
         List<string> steps,
         CancellationToken cancellationToken)
     {
@@ -361,7 +351,8 @@ internal sealed class InboundExecutor(
         var pollInterval = TimeSpan.FromMilliseconds(500);
         var startTime = DateTimeOffset.UtcNow;
         var alarmDetected = false;
-        PlcError? detectedError = null;
+        var alarmNotificationSent = false;
+        ErrorDetail? detectedError = null;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -382,17 +373,39 @@ internal sealed class InboundExecutor(
                 var errorMessage = PlcErrorCodeMapper.GetMessage(errorCode);
                 steps.Add($"Error Code: {errorCode} - {errorMessage}");
 
-                detectedError = new PlcError(errorCode, errorMessage, commandId);
+                detectedError = new ErrorDetail(errorCode, errorMessage);
 
-                if (_stopOnAlarm)
+                // Send immediate alarm notification to result channel (only once)
+                if (!alarmNotificationSent)
                 {
-                    // Stop immediately on alarm
-                    return CommandExecutionResult.Error(
-                        $"Command stopped: {detectedError}",
+                    alarmNotificationSent = true;
+                    var alarmNotification = new CommandResult
+                    {
+                        CommandId = command.CommandId,
+                        PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+                        Status = ExecutionStatus.Error,
+                        Message = $"⚠️ Alarm detected during execution: {detectedError}",
+                        StartedAt = startTime,
+                        CompletedAt = DateTimeOffset.UtcNow,
+                        PlcError = detectedError
+                    };
+
+                    await resultChannel.Writer.WriteAsync(alarmNotification, cancellationToken)
+                        .ConfigureAwait(false);
+                    
+                    steps.Add("Sent alarm notification to result channel");
+                }
+
+                // If failOnAlarm is enabled, return Failed immediately
+                if (_failOnAlarm)
+                {
+                    return CommandExecutionResult.Failed(
+                        $"Command failed due to alarm (failOnAlarm=true): {detectedError}",
                         steps,
                         detectedError);
                 }
-                // Otherwise continue to wait for CommandFailed or Completed
+
+                // Otherwise continue waiting for Completed or Failed flag
             }
 
             // Check CommandFailed flag

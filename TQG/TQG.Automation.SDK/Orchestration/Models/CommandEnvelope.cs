@@ -1,4 +1,4 @@
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Models;
 

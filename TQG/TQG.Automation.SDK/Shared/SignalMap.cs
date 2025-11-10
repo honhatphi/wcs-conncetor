@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Maps PLC signal addresses to logical operations.

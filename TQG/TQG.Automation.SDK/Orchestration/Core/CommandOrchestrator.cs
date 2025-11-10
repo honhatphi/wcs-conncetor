@@ -1,10 +1,11 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Orchestration.Workers;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Core;
 
@@ -29,7 +30,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     private readonly object _lifecycleLock = new();
     private bool _isStarted;
     private bool _isDisposed;
-    private Func<BarcodeValidationRequestedEventArgs, CancellationToken, Task<BarcodeValidationResponse>>? _barcodeValidationCallback;
+    private Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>>? _barcodeValidationCallback;
 
     /// <summary>
     /// Initializes the orchestrator with fresh channels and state.
@@ -49,7 +50,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     /// Must be called before RegisterDevice().
     /// </summary>
     public void SetBarcodeValidationCallback(
-        Func<BarcodeValidationRequestedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> callback)
+        Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> callback)
     {
         _barcodeValidationCallback = callback ?? throw new ArgumentNullException(nameof(callback));
     }
@@ -93,6 +94,13 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
             // Create and start Matchmaker
             _matchmaker = new Matchmaker(_channels, _pauseGate, _tracker);
+            
+            // Register device capabilities with Matchmaker
+            foreach (var (deviceId, worker) in _deviceWorkers)
+            {
+                _matchmaker.RegisterDeviceCapabilities(deviceId, worker.GetCapabilities());
+            }
+            
             _matchmakerTask = Task.Run(() => _matchmaker.RunAsync(_shutdownCts.Token), CancellationToken.None);
 
             // Create and start ReplyHub
@@ -132,7 +140,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         var workerStopTasks = _deviceWorkers.Values.Select(w => w.StopAsync()).ToList();
         try
         {
-            await Task.WhenAll(workerStopTasks).ConfigureAwait(false);
+            await Task.WhenAll(workerStopTasks);
         }
         catch (OperationCanceledException)
         {
@@ -140,7 +148,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         }
 
         // Complete all channels (no more writes)
-        await _channels.DisposeAsync().ConfigureAwait(false);
+        await _channels.DisposeAsync();
 
         // Wait for Matchmaker and ReplyHub to drain and finish
         var tasksToWait = new List<Task>();
@@ -153,7 +161,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         {
             try
             {
-                await Task.WhenAll(tasksToWait).ConfigureAwait(false);
+                await Task.WhenAll(tasksToWait);
             }
             catch (OperationCanceledException)
             {
@@ -189,8 +197,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         try
         {
             // Write to input channel (bounded: may block on full)
-            await _channels.InputChannel.Writer.WriteAsync(envelope, cancellationToken)
-                .ConfigureAwait(false);
+            await _channels.InputChannel.Writer.WriteAsync(envelope, cancellationToken);
 
             // Auto-resume orchestration when new command arrives (only if paused)
             if (!_pauseGate.IsSet)
@@ -330,7 +337,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         // Read current location from PLC
         try
         {
-            return await worker.ReadCurrentLocationAsync(cancellationToken).ConfigureAwait(false);
+            return await worker.ReadCurrentLocationAsync(cancellationToken);
         }
         catch
         {
@@ -448,8 +455,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
         // Read from broadcast channel (multiple observers supported)
         // ReplyHub broadcasts each result here after updating tracker
-        await foreach (var result in _channels.BroadcastChannel.Reader.ReadAllAsync(cancellationToken)
-            .ConfigureAwait(false))
+        await foreach (var result in _channels.BroadcastChannel.Reader.ReadAllAsync(cancellationToken))
         {
             yield return result;
         }

@@ -1,7 +1,7 @@
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
-namespace TQG.Automation.SDK.Orchestration.Executors;
+namespace TQG.Automation.SDK.Clients;
 
 /// <summary>
 /// Extension methods for IPlcClient to simplify common write operations.

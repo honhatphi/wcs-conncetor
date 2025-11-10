@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Response from user for barcode validation.
@@ -31,16 +31,6 @@ public sealed record BarcodeValidationResponse
     /// Enter direction for material flow (optional).
     /// </summary>
     public Direction? EnterDirection { get; init; }
-
-    /// <summary>
-    /// Exit direction for material flow (optional).
-    /// </summary>
-    public Direction? ExitDirection { get; init; }
-
-    /// <summary>
-    /// Optional reason for rejection (if IsValid = false).
-    /// </summary>
-    public string? Reason { get; init; }
 
     /// <summary>
     /// When the validation response was provided.

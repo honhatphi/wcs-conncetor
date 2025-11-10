@@ -1,4 +1,4 @@
-namespace TQG.Automation.SDK.Models;
+namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Result of bulk command submission operation.
@@ -18,5 +18,8 @@ public sealed record SubmissionResult
     /// <summary>
     /// Details of rejected commands with reasons.
     /// </summary>
-    public IReadOnlyList<(CommandRequest Command, string Reason)> RejectedCommands { get; init; } = [];
+    public IReadOnlyList<RejectCommand> RejectedCommands { get; init; } = [];
 }
+
+
+public record RejectCommand(TransportTask Command, string Reason);

@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Configuration;
 

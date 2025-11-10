@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
-using TQG.Automation.SDK.Models;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Infrastructure;
 
@@ -287,8 +287,8 @@ internal sealed class CommandTrackingInfo
     public CommandType CommandType { get; init; }
     public Location? SourceLocation { get; init; }
     public Location? DestinationLocation { get; init; }
-    public int? GateNumber { get; init; }
+    public int GateNumber { get; init; }
     public bool? PalletAvailable { get; set; }
     public bool? PalletUnavailable { get; set; }
-    public PlcError? PlcError { get; set; }
+    public ErrorDetail? PlcError { get; set; }
 }

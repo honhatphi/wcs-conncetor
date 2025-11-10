@@ -1,9 +1,10 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Orchestration.Executors;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Orchestration.Workers;
 
@@ -38,7 +39,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
         IPlcClient plcClient,
         PlcConnectionOptions config,
         OrchestratorChannels channels,
-        Func<BarcodeValidationRequestedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
+        Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
     {
         _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -46,9 +47,9 @@ internal sealed class DeviceWorker : IAsyncDisposable
         _deviceId = config.DeviceId;
         _deviceChannel = channels.GetOrCreateDeviceChannel(config.DeviceId);
         _workerCts = new CancellationTokenSource();
-        _inboundExecutor = new InboundExecutor(plcClient, config.SignalMap, config.StopOnAlarm, barcodeValidationCallback);
-        _outboundExecutor = new OutboundExecutor(plcClient, config.SignalMap, config.StopOnAlarm);
-        _transferExecutor = new TransferExecutor(plcClient, config.SignalMap, config.StopOnAlarm);
+        _inboundExecutor = new InboundExecutor(plcClient, config.SignalMap, config.FailOnAlarm, barcodeValidationCallback);
+        _outboundExecutor = new OutboundExecutor(plcClient, config.SignalMap, config.FailOnAlarm);
+        _transferExecutor = new TransferExecutor(plcClient, config.SignalMap, config.FailOnAlarm);
         _checkExecutor = new CheckExecutor(plcClient, config.SignalMap);
         _manualRecoveryTrigger = new AsyncManualResetEvent();
     }
@@ -62,6 +63,14 @@ internal sealed class DeviceWorker : IAsyncDisposable
             return; // Already started
 
         _workerTask = Task.Run(() => RunAsync(_workerCts.Token), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Gets the operational capabilities of this device.
+    /// </summary>
+    public DeviceCapabilities GetCapabilities()
+    {
+        return _config.Capabilities;
     }
 
     /// <summary>
@@ -109,10 +118,10 @@ internal sealed class DeviceWorker : IAsyncDisposable
             var blockAddress = PlcAddress.Parse(_config.SignalMap.CurrentBlock);
             var depthAddress = PlcAddress.Parse(_config.SignalMap.CurrentDepth);
 
-            var floor = await _plcClient.ReadAsync<int>(floorAddress, cancellationToken).ConfigureAwait(false);
-            var rail = await _plcClient.ReadAsync<int>(railAddress, cancellationToken).ConfigureAwait(false);
-            var block = await _plcClient.ReadAsync<int>(blockAddress, cancellationToken).ConfigureAwait(false);
-            var depth = await _plcClient.ReadAsync<int>(depthAddress, cancellationToken).ConfigureAwait(false);
+            var floor = await _plcClient.ReadAsync<int>(floorAddress, cancellationToken);
+            var rail = await _plcClient.ReadAsync<int>(railAddress, cancellationToken);
+            var block = await _plcClient.ReadAsync<int>(blockAddress, cancellationToken);
+            var depth = await _plcClient.ReadAsync<int>(depthAddress, cancellationToken);
 
             return new Location
             {
@@ -135,11 +144,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         try
         {
-            await SignalAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+            await SignalAvailabilityAsync(cancellationToken);
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                await ProcessNextCommandAsync(cancellationToken).ConfigureAwait(false);
+                await ProcessNextCommandAsync(cancellationToken);
             }
         }
         catch (OperationCanceledException)
@@ -157,15 +166,13 @@ internal sealed class DeviceWorker : IAsyncDisposable
 
         try
         {
-            command = await _deviceChannel.Reader.ReadAsync(cancellationToken)
-                .ConfigureAwait(false);
+            command = await _deviceChannel.Reader.ReadAsync(cancellationToken); ;
 
-            var result = await ExecuteCommandAsync(command, cancellationToken)
-                .ConfigureAwait(false);
+            var result = await ExecuteCommandAsync(command, cancellationToken);
 
-            await PublishResultAsync(result, cancellationToken).ConfigureAwait(false);
+            await PublishResultAsync(result, cancellationToken);
 
-            await HandlePostExecutionAsync(result, cancellationToken).ConfigureAwait(false);
+            await HandlePostExecutionAsync(result, cancellationToken);
         }
         catch (ChannelClosedException)
         {
@@ -173,12 +180,12 @@ internal sealed class DeviceWorker : IAsyncDisposable
         }
         catch (OperationCanceledException) when (command != null)
         {
-            await HandleCommandCancellationAsync(command).ConfigureAwait(false);
+            await HandleCommandCancellationAsync(command);
             throw; // Propagate to exit worker loop
         }
         catch (Exception ex) when (command != null)
         {
-            await HandleCommandErrorAsync(command, ex, cancellationToken).ConfigureAwait(false);
+            await HandleCommandErrorAsync(command, ex, cancellationToken);
         }
     }
 
@@ -187,8 +194,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     /// </summary>
     private async Task PublishResultAsync(CommandResult result, CancellationToken cancellationToken)
     {
-        await _channels.ResultChannel.Writer.WriteAsync(result, cancellationToken)
-            .ConfigureAwait(false);
+        await _channels.ResultChannel.Writer.WriteAsync(result, cancellationToken);
     }
 
     /// <summary>
@@ -203,11 +209,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
         {
             await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken); // Wait 5 seconds before signaling availability again
 
-            await SignalAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+            await SignalAvailabilityAsync(cancellationToken);
         }
         else
         {
-            await WaitForDeviceRecoveryAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForDeviceRecoveryAsync(cancellationToken);
         }
     }
 
@@ -221,7 +227,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             ExecutionStatus.Cancelled,
             "Worker stopped during execution");
 
-        await TryPublishResultAsync(result).ConfigureAwait(false);
+        await TryPublishResultAsync(result);
     }
 
     /// <summary>
@@ -237,11 +243,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
             ExecutionStatus.Error,
             $"Worker error: {exception.Message}");
 
-        await TryPublishResultAsync(result).ConfigureAwait(false);
+        await   TryPublishResultAsync(result);
 
         if (!cancellationToken.IsCancellationRequested)
         {
-            await WaitForDeviceRecoveryAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForDeviceRecoveryAsync(cancellationToken);
         }
     }
 
@@ -269,8 +275,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         try
         {
-            await _channels.ResultChannel.Writer.WriteAsync(result, CancellationToken.None)
-                .ConfigureAwait(false);
+            await _channels.ResultChannel.Writer.WriteAsync(result, CancellationToken.None);
         }
         catch
         {
@@ -290,8 +295,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
         try
         {
             // Step 1: Verify link is established
-            var isLinked = await _plcClient.IsLinkEstablishedAsync(cancellationToken)
-                .ConfigureAwait(false);
+            var isLinked = await _plcClient.IsLinkEstablishedAsync(cancellationToken);
 
             if (!isLinked)
             {
@@ -306,9 +310,8 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 };
             }
 
-            // Step 2: Verify device is ready
-            var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken)
-                .ConfigureAwait(false);
+            // Step 2: Verify device is ready (with retry logic)
+            var isReady = await WaitForDeviceReadyAsync(cancellationToken);
 
             if (!isReady)
             {
@@ -328,8 +331,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             timeoutCts.CancelAfter(_config.CommandTimeout);
 
             // Step 4: Execute via appropriate executor based on command type
-            var executionResult = await ExecuteCommandInternalAsync(command, timeoutCts.Token)
-                .ConfigureAwait(false);
+            var executionResult = await ExecuteCommandInternalAsync(command, timeoutCts.Token); ;
 
             var completedTime = DateTimeOffset.UtcNow;
 
@@ -398,17 +400,13 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         return command.CommandType switch
         {
-            CommandType.Inbound => await _inboundExecutor.ExecuteAsync(command, cancellationToken)
-                .ConfigureAwait(false),
+            CommandType.Inbound => await _inboundExecutor.ExecuteAsync(command, _channels.ResultChannel, cancellationToken),
 
-            CommandType.Outbound => await _outboundExecutor.ExecuteAsync(command, cancellationToken)
-                .ConfigureAwait(false),
+            CommandType.Outbound => await _outboundExecutor.ExecuteAsync(command, _channels.ResultChannel, cancellationToken),
 
-            CommandType.Transfer => await _transferExecutor.ExecuteAsync(command, cancellationToken)
-                .ConfigureAwait(false),
+            CommandType.Transfer => await _transferExecutor.ExecuteAsync(command, _channels.ResultChannel, cancellationToken),
 
-            CommandType.CheckPallet => await _checkExecutor.ExecuteAsync(command, cancellationToken)
-                .ConfigureAwait(false),
+            CommandType.CheckPallet => await _checkExecutor.ExecuteAsync(command, cancellationToken),
 
             _ => throw new InvalidOperationException($"Unknown command type: {command.CommandType}")
         };
@@ -418,14 +416,14 @@ internal sealed class DeviceWorker : IAsyncDisposable
     /// Determines if device should signal availability based on command execution result.
     /// Device should NOT signal availability if:
     /// - Status is Error or Failed (device in error state, needs manual reset)
-    /// - Status is Warning but StopOnAlarm=true (treated as error)
+    /// - Status is Warning but FailOnAlarm=true (treated as failed)
     /// </summary>
     private bool ShouldSignalAvailability(CommandResult result)
     {
         return result.Status switch
         {
             ExecutionStatus.Success => true,
-            ExecutionStatus.Warning => !_config.StopOnAlarm, // Warning OK unless StopOnAlarm
+            ExecutionStatus.Warning => !_config.FailOnAlarm, // Warning OK unless FailOnAlarm
             ExecutionStatus.Error => false,   // Device in error state
             ExecutionStatus.Failed => false,  // PLC reported failure
             ExecutionStatus.Timeout => false,  // Timeout is transient, allow retry
@@ -444,12 +442,56 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         if (_config.AutoRecoveryEnabled)
         {
-            await WaitForAutoRecoveryAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForAutoRecoveryAsync(cancellationToken);
         }
         else
         {
-            await WaitForManualRecoveryAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForManualRecoveryAsync(cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Waits for device to become ready by polling DeviceReady flag.
+    /// Used before command execution to ensure device is available.
+    /// Returns true if device becomes ready within timeout, false otherwise.
+    /// </summary>
+    private async Task<bool> WaitForDeviceReadyAsync(CancellationToken cancellationToken)
+    {
+        var maxWaitTime = _config.CommandTimeout; // Use configured command timeout
+        var pollInterval = TimeSpan.FromSeconds(1); // Check every second
+        var deadline = DateTimeOffset.UtcNow + maxWaitTime;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
+
+                if (isReady)
+                {
+                    return true;
+                }
+
+                // Check if we've exceeded the wait time
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    return false; // Timeout waiting for device to become ready
+                }
+
+                await Task.Delay(pollInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // Error reading device status, continue polling
+                await Task.Delay(pollInterval, cancellationToken);
+            }
+        }
+
+        return false; // Cancelled
     }
 
     /// <summary>
@@ -464,12 +506,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
         {
             try
             {
-                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
-                    await SignalAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+                    await SignalAvailabilityAsync(cancellationToken);
                     return;
                 }
 
@@ -482,7 +523,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
                     lastLogTime = now;
                 }
 
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -491,7 +532,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             catch (Exception)
             {
                 // Error reading device status, continue polling
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
             }
         }
     }
@@ -510,17 +551,16 @@ internal sealed class DeviceWorker : IAsyncDisposable
             try
             {
                 // Wait for manual recovery trigger
-                await _manualRecoveryTrigger.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await _manualRecoveryTrigger.WaitAsync(cancellationToken);
                 _manualRecoveryTrigger.Reset(); // Reset for next error
 
                 // Verify device is actually ready
-                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
                     // Console.WriteLine($"[{_deviceId}] Manual recovery successful. Device ready.");
-                    await SignalAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+                    await SignalAvailabilityAsync(cancellationToken);
                     return;
                 }
                 else
@@ -536,7 +576,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             catch (Exception)
             {
                 // Error during recovery check, continue waiting
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
             }
         }
     }
@@ -556,8 +596,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
 
         try
         {
-            await _channels.AvailabilityChannel.Writer.WriteAsync(ticket, cancellationToken)
-                .ConfigureAwait(false);
+            await _channels.AvailabilityChannel.Writer.WriteAsync(ticket, cancellationToken);
         }
         catch (ChannelClosedException)
         {

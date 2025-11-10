@@ -1,6 +1,6 @@
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Exceptions;
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Management;
 
@@ -106,7 +106,7 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
         {
             return await _client.ReadAsync<T>(address, cancellationToken).ConfigureAwait(false);
         }
-        catch (PlcConnectionException)
+        catch (PlcConnectionFailedException)
         {
             // Trigger reconnect on next health check
             _reconnectAttempts = 0;
@@ -130,7 +130,7 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
         {
             await _client.WriteAsync(address, value, cancellationToken).ConfigureAwait(false);
         }
-        catch (PlcConnectionException)
+        catch (PlcConnectionFailedException)
         {
             // Trigger reconnect on next health check
             _reconnectAttempts = 0;

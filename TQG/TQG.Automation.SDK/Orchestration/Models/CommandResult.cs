@@ -1,6 +1,6 @@
 namespace TQG.Automation.SDK.Orchestration.Models;
 
-using TQG.Automation.SDK.Models;
+using TQG.Automation.SDK.Shared;
 
 /// <summary>
 /// Represents the result of command execution.
@@ -58,7 +58,7 @@ internal sealed record CommandResult
     /// PLC error information if an error/alarm was encountered during execution.
     /// Contains error code and descriptive message.
     /// </summary>
-    public PlcError? PlcError { get; init; }
+    public ErrorDetail? PlcError { get; init; }
 
     /// <summary>
     /// Optional: PLC-specific data returned during execution.
