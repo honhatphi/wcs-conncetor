@@ -133,60 +133,79 @@ Khi phát hiện alarm (`ErrorAlarm = true`) trong quá trình thực thi, hệ 
 sequenceDiagram
     participant App as Phần mềm
     participant GW as AutomationGateway
-    participant Dispatcher as TaskDispatcher
-    participant Monitor as DeviceMonitor
+    participant ORC as CommandOrchestrator
+    participant Worker as DeviceWorker
+    participant PLC as PLC Device
     participant HMI as Nhân viên vận hành
     
-    Note over GW,Monitor: Task đang thực thi bình thường
+    Note over GW,Worker: Task đang thực thi bình thường
     
-    Monitor->>GW: Phát hiện ErrorAlarm = true
-    GW->>App: TaskAlarm event (Thông báo alarm)
+    Worker->>Worker: Phát hiện ErrorAlarm = true
+    Worker->>GW: TaskAlarm event (Thông báo alarm)
+    GW->>App: TaskAlarm event
     
     alt FailOnAlarm = true (Fail Fast)
-        Note over GW,Dispatcher: Xử lý lỗi ngay lập tức
-        GW->>Dispatcher: PauseQueue() (Tạm dừng)
-        GW->>Dispatcher: RemoveTask() (Loại bỏ task)
-        GW->>App: TaskFailed event (Báo lỗi)
-        
-        rect rgb(255, 230, 230)
-            Note over App,HMI: Recovery Process
-            App->>HMI: Thông báo lỗi cần khắc phục
-            HMI->>Monitor: Xử lý lỗi (log, thông báo, etc.)
-            HMI->>Monitor: Khắc phục sự cố thủ công
-            HMI->>Monitor: ResetDeviceStatus() (Cập nhật HMI)
+        rect rgb(255, 200, 200)
+            Note over Worker,ORC: ⛔ Xử lý lỗi ngay lập tức
+            Worker->>GW: TaskFailed event
+            GW->>App: TaskFailed event (Báo lỗi)
+            App->>GW: PauseQueue() (Tạm dừng queue)
         end
         
-        HMI->>Monitor: Báo hoàn tất khắc phục
-        Monitor->>GW: Thiết bị sẵn sàng
+        rect rgb(230, 240, 255)
+            Note over App,HMI: 🔧 Recovery Process (Blocking)
+            App->>HMI: Thông báo lỗi cần khắc phục
+            HMI->>PLC: Xử lý lỗi tại HMI
+            HMI->>PLC: Khắc phục sự cố thủ công
+            HMI->>PLC: Cập nhật trạng thái thiết bị
+            Note over HMI,PLC: Reset flags và status
+        end
+        
+        HMI->>App: Báo hoàn tất khắc phục
         App->>GW: ResumeQueue() để tiếp tục
+        Note over GW,ORC: ✅ Hệ thống tiếp tục xử lý
         
     else FailOnAlarm = false (Continue Mode - Default)
-        Note over GW,Dispatcher: Tiếp tục thực thi, chờ kết quả
-        GW->>Dispatcher: [Lưi xảy ra] (Không xóa task)
+        rect rgb(255, 250, 200)
+            Note over Worker,ORC: ⚠️ Tiếp tục thực thi, chờ kết quả
+            Note over Worker: Task không bị xóa, chờ PLC xử lý
+        end
         
-        rect rgb(255, 255, 230)
-            Note over App,HMI: Recovery Process (Non-blocking)
+        rect rgb(240, 255, 240)
+            Note over App,HMI: 📢 Recovery Process (Non-blocking)
             App->>HMI: Thông báo alarm (Warning)
-            HMI->>Monitor: Theo dõi tình huống
+            HMI->>HMI: Theo dõi tình huống
         end
         
         alt PLC tự khắc phục và hoàn thành
-            Monitor->>GW: Completed flag = true
-            GW->>App: TaskSucceeded (Warning status)
-            Note over App: Task hoàn thành với cảnh báo
+            rect rgb(200, 255, 200)
+                Note over PLC: 🔄 Auto Recovery
+                PLC->>Worker: Set Completed flag = true
+                Worker->>GW: TaskSucceeded (Warning status)
+                GW->>App: TaskSucceeded event
+                Note over App: ✅ Task hoàn thành với cảnh báo
+            end
             
         else PLC không khắc phục được
-            HMI->>Monitor: Khắc phục thủ công
-            HMI->>Monitor: Cập nhật kết quả ở HMI
+            HMI->>PLC: Khắc phục thủ công tại HMI
+            HMI->>PLC: Cập nhật kết quả
             
             alt Khắc phục thành công
-                HMI->>Monitor: Set Completed flag
-                Monitor->>GW: Completed flag = true
-                GW->>App: TaskSucceeded (Warning status)
+                rect rgb(200, 255, 200)
+                    Note over HMI,PLC: ✅ Manual Recovery Success
+                    HMI->>PLC: Set Completed flag
+                    PLC->>Worker: Completed flag = true
+                    Worker->>GW: TaskSucceeded (Warning status)
+                    GW->>App: TaskSucceeded event
+                end
             else Không khắc phục được
-                HMI->>Monitor: Set Failed flag
-                Monitor->>GW: Failed flag = true
-                GW->>App: TaskFailed event
+                rect rgb(255, 200, 200)
+                    Note over HMI,PLC: ❌ Cannot Recover
+                    HMI->>PLC: Set Failed flag
+                    PLC->>Worker: Failed flag = true
+                    Worker->>GW: TaskFailed event
+                    GW->>App: TaskFailed event
+                end
             end
         end
     end
@@ -197,46 +216,47 @@ sequenceDiagram
 #### Khi FailOnAlarm = true (Fail Fast Mode):
 
 1. **Phát hiện Alarm**:
-   - `DeviceMonitor` phát hiện `ErrorAlarm = true`
-   - Raise `TaskAlarm` event ngay lập tức
+   - `DeviceWorker` phát hiện `ErrorAlarm = true` khi polling PLC
+   - Raise `TaskAlarm` event ngay lập tức qua `AutomationGateway`
    - **Dừng ngay** và raise `TaskFailed` event
 
 2. **Recovery Actions**:
-   - System tự động gọi `PauseQueue()` (tạm dừng queue)
-   - Xóa task khỏi queue bằng `RemoveTask()`
+   - Application nhận `TaskFailed` event
+   - App có thể gọi `PauseQueue()` để tạm dừng xử lý các task khác
    - Thông báo lỗi cho nhân viên vận hành
 
 3. **Manual Intervention**:
-   - Nhân viên vận hành khắc phục sự cố
-   - Cập nhật trạng thái thiết bị tại HMI
-   - Gọi `ResetDeviceStatus()` khi hoàn tất
+   - Nhân viên vận hành khắc phục sự cố tại HMI
+   - Cập nhật trạng thái thiết bị và reset các flags trên PLC
+   - Xác nhận thiết bị đã sẵn sàng
 
 4. **Resume**:
    - App gọi `ResumeQueue()` để tiếp tục xử lý
+   - `CommandOrchestrator` và `Matchmaker` tiếp tục matching tasks
 
 #### Khi FailOnAlarm = false (Continue Mode - Default):
 
 1. **Phát hiện Alarm**:
-   - `DeviceMonitor` phát hiện `ErrorAlarm = true`
+   - `DeviceWorker` phát hiện `ErrorAlarm = true`
    - Raise `TaskAlarm` event (thông báo warning)
-   - **Tiếp tục chờ** kết quả từ PLC
+   - **Tiếp tục chờ** kết quả từ PLC (không dừng task)
 
 2. **Parallel Recovery**:
-   - Task vẫn tiếp tục thực thi
-   - Nhân viên được thông báo để theo dõi
+   - Task vẫn tiếp tục thực thi trong `DeviceWorker`
+   - Application nhận warning và có thể thông báo nhân viên
    - PLC có thể tự khắc phục hoặc cần can thiệp
 
 3. **Outcome Scenarios**:
    
    **a) PLC tự recovery thành công:**
-   - PLC set `Completed = true`
-   - Raise `TaskSucceeded` với `Warning` status
-   - Task hoàn thành bình thường
+   - PLC tự động xử lý và set `Completed = true`
+   - `DeviceWorker` nhận được và raise `TaskSucceeded` với `Warning` status
+   - Task hoàn thành bình thường, `ReplyHub` broadcast kết quả
    
    **b) Cần can thiệp thủ công:**
    - Nhân viên khắc phục tại HMI
-   - Cập nhật cờ `Completed` hoặc `Failed`
-   - System nhận kết quả và raise event tương ứng
+   - Cập nhật cờ `Completed` hoặc `Failed` trên PLC
+   - `DeviceWorker` polling và nhận kết quả, raise event tương ứng
 
 ### 3.3.3 So Sánh Hai Chế Độ
 
