@@ -15,10 +15,11 @@ namespace TQG.Automation.SDK.Clients;
 internal sealed class TcpEmulatedPlcClient : IPlcClient
 {
     private readonly PlcConnectionOptions _options;
-    private readonly SemaphoreSlim _operationLock;
+    private readonly SemaphoreSlim _ioLock;
     private readonly ConcurrentDictionary<string, byte[]> _dataStore;
     private TcpClient? _tcpClient;
-    private NetworkStream? _networkStream;
+    private StreamWriter? _writer;
+    private StreamReader? _reader;
     private bool _isConnected;
     private bool _isDisposed;
 
@@ -34,7 +35,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
-        _operationLock = new SemaphoreSlim(1, 1);
+        _ioLock = new SemaphoreSlim(1, 1);
         _dataStore = new ConcurrentDictionary<string, byte[]>();
     }
 
@@ -46,66 +47,17 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-        await _operationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _ioLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (_isConnected && _tcpClient?.Connected == true)
                 return; // Already connected
 
-            // Close existing connection if any
-            if (_tcpClient != null)
-            {
-                try
-                {
-                    _networkStream?.Close();
-                    _tcpClient.Close();
-                }
-                catch { }
-                finally
-                {
-                    _networkStream?.Dispose();
-                    _tcpClient?.Dispose();
-                    _networkStream = null;
-                    _tcpClient = null;
-                }
-            }
-
-            // Create new TCP client
-            _tcpClient = new TcpClient
-            {
-                ReceiveTimeout = (int)_options.OperationTimeout.TotalMilliseconds,
-                SendTimeout = (int)_options.OperationTimeout.TotalMilliseconds
-            };
-
-            // Connect with timeout
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(_options.ConnectTimeout);
-
-            try
-            {
-                await _tcpClient.ConnectAsync(_options.IpAddress, _options.Port, cts.Token).ConfigureAwait(false);
-                _networkStream = _tcpClient.GetStream();
-                _isConnected = true;
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new PlcConnectionFailedException($"Connection to {_options.DeviceId} ({_options.IpAddress}:{_options.Port}) timed out after {_options.ConnectTimeout.TotalSeconds}s.");
-            }
-            catch (SocketException ex)
-            {
-                throw new PlcConnectionFailedException($"Failed to connect to {_options.DeviceId} ({_options.IpAddress}:{_options.Port}): {ex.Message}", ex);
-            }
-            catch (Exception ex) when (ex is not PlcException)
-            {
-                throw new PlcConnectionFailedException($"Unexpected error connecting to {_options.DeviceId}: {ex.Message}", ex);
-            }
-
-            if (!_tcpClient.Connected)
-                throw new PlcConnectionFailedException($"Failed to establish connection to {_options.DeviceId} ({_options.IpAddress}:{_options.Port}).");
+            await EnsureConnectionAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            _operationLock.Release();
+            _ioLock.Release();
         }
     }
 
@@ -115,45 +67,16 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
         if (_isDisposed)
             return;
 
-        await _operationLock.WaitAsync().ConfigureAwait(false);
+        await _ioLock.WaitAsync().ConfigureAwait(false);
         try
         {
             _isConnected = false;
-
-            if (_networkStream != null)
-            {
-                try
-                {
-                    await _networkStream.FlushAsync().ConfigureAwait(false);
-                    _networkStream.Close();
-                }
-                catch { }
-                finally
-                {
-                    _networkStream.Dispose();
-                    _networkStream = null;
-                }
-            }
-
-            if (_tcpClient != null)
-            {
-                try
-                {
-                    _tcpClient.Close();
-                }
-                catch { }
-                finally
-                {
-                    _tcpClient.Dispose();
-                    _tcpClient = null;
-                }
-            }
-
+            CloseConnection();
             _dataStore.Clear();
         }
         finally
         {
-            _operationLock.Release();
+            _ioLock.Release();
         }
     }
 
@@ -162,56 +85,35 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-        await _operationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _ioLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!IsConnected)
-                throw new PlcConnectionFailedException($"Not connected to TCP PLC {_options.DeviceId}. Call ConnectAsync first.");
+            var addressStr = FormatAddress(address);
+            var response = await SendCommandAsync($"READ {_options.DeviceId} {addressStr}", cancellationToken).ConfigureAwait(false);
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(_options.OperationTimeout);
+            if (!response.StartsWith("OK "))
+                throw new PlcConnectionFailedException($"Read failed at {address}: {response}");
 
-            try
-            {
-                // Send read request to TCP server
-                var request = BuildReadRequest(address);
-                await SendRequestAsync(request, cts.Token).ConfigureAwait(false);
+            var payload = response[3..].Trim();
+            var value = ConvertTo<T>(payload, address.DataType);
 
-                // Receive response from TCP server
-                var response = await ReceiveResponseAsync(cts.Token).ConfigureAwait(false);
-                var value = ParseReadResponse(response, address);
-
-                if (value is T typedValue)
-                    return typedValue;
-
-                // Attempt conversion
-                try
-                {
-                    return (T)Convert.ChangeType(value, typeof(T))!;
-                }
-                catch (Exception ex)
-                {
-                    throw new PlcDataFormatException(
-                        $"Cannot convert value of type {value?.GetType().Name ?? "null"} to {typeof(T).Name} for address {address}.",
-                        ex);
-                }
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new Exceptions.TimeoutException($"Read operation timed out for {_options.DeviceId} at {address} after {_options.OperationTimeout.TotalSeconds}s.");
-            }
-            catch (SocketException ex)
-            {
-                throw new PlcConnectionFailedException($"Connection lost to {_options.DeviceId}: {ex.Message}", ex);
-            }
-            catch (Exception ex) when (ex is not PlcException)
-            {
-                throw new PlcConnectionFailedException($"Error reading from {_options.DeviceId} at {address}: {ex.Message}", ex);
-            }
+            return value;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new Exceptions.TimeoutException($"Read operation timed out for {_options.DeviceId} at {address} after {_options.OperationTimeout.TotalSeconds}s.");
+        }
+        catch (SocketException ex)
+        {
+            throw new PlcConnectionFailedException($"Connection lost to {_options.DeviceId}: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is not PlcException)
+        {
+            throw new PlcConnectionFailedException($"Error reading from {_options.DeviceId} at {address}: {ex.Message}", ex);
         }
         finally
         {
-            _operationLock.Release();
+            _ioLock.Release();
         }
     }
 
@@ -220,144 +122,189 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-        await _operationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _ioLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!IsConnected)
-                throw new PlcConnectionFailedException($"Not connected to TCP PLC {_options.DeviceId}. Call ConnectAsync first.");
+            var addressStr = FormatAddress(address);
+            var valueStr = FormatValue(value);
+            var response = await SendCommandAsync($"WRITE {_options.DeviceId} {addressStr} {valueStr}", cancellationToken).ConfigureAwait(false);
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(_options.OperationTimeout);
-
-            try
-            {
-                // Send write request to TCP server
-                var request = BuildWriteRequest(address, value);
-                await SendRequestAsync(request, cts.Token).ConfigureAwait(false);
-
-                // Receive response from TCP server
-                var response = await ReceiveResponseAsync(cts.Token).ConfigureAwait(false);
-                ParseWriteResponse(response, address);
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new Exceptions.TimeoutException($"Write operation timed out for {_options.DeviceId} at {address} after {_options.OperationTimeout.TotalSeconds}s.");
-            }
-            catch (SocketException ex)
-            {
-                throw new PlcConnectionFailedException($"Connection lost to {_options.DeviceId}: {ex.Message}", ex);
-            }
-            catch (Exception ex) when (ex is not PlcException)
-            {
-                throw new PlcConnectionFailedException($"Error writing to {_options.DeviceId} at {address}: {ex.Message}", ex);
-            }
+            if (!response.StartsWith("OK"))
+                throw new PlcConnectionFailedException($"Write failed at {address}: {response}");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new Exceptions.TimeoutException($"Write operation timed out for {_options.DeviceId} at {address} after {_options.OperationTimeout.TotalSeconds}s.");
+        }
+        catch (SocketException ex)
+        {
+            throw new PlcConnectionFailedException($"Connection lost to {_options.DeviceId}: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is not PlcException)
+        {
+            throw new PlcConnectionFailedException($"Error writing to {_options.DeviceId} at {address}: {ex.Message}", ex);
         }
         finally
         {
-            _operationLock.Release();
+            _ioLock.Release();
         }
     }
 
     /// <summary>
-    /// Builds a TCP read request message.
-    /// Format: READ|DB{dbNumber}.DB{dataType}{offset}.{bitOffset}
-    /// Example: READ|DB1.DBX0.0
+    /// Sends a command to the TCP PLC and waits for response with timeout handling.
+    /// Thread-safe operation using I/O lock to prevent concurrent command execution.
     /// </summary>
-    private static string BuildReadRequest(PlcAddress address)
+    /// <param name="command">Command to send to the PLC.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response received from the PLC.</returns>
+    private async Task<string> SendCommandAsync(string command, CancellationToken cancellationToken)
     {
-        var addressStr = address.DataType == 'X'
-            ? $"DB{address.DataBlock}.DB{address.DataType}{address.Offset}.{address.BitOffset}"
-            : $"DB{address.DataBlock}.DB{address.DataType}{address.Offset}";
-        
-        return $"READ|{addressStr}\n";
+        await EnsureConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(_options.OperationTimeout);
+
+        try
+        {
+            await _writer!.WriteLineAsync(command).ConfigureAwait(false);
+            var response = await _reader!.ReadLineAsync(cts.Token).ConfigureAwait(false);
+            
+            if (response is null)
+                return "ERR NoResponse";
+            
+            return response;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new Exceptions.TimeoutException($"Command '{command}' timed out after {_options.OperationTimeout.TotalSeconds}s.");
+        }
     }
 
     /// <summary>
-    /// Builds a TCP write request message.
-    /// Format: WRITE|DB{dbNumber}.DB{dataType}{offset}.{bitOffset}|{value}
-    /// Example: WRITE|DB1.DBX0.0|1
+    /// Ensures TCP connection is established and ready for communication.
+    /// Automatically reconnects if current connection is invalid.
     /// </summary>
-    private static string BuildWriteRequest<T>(PlcAddress address, T value)
+    private async Task EnsureConnectionAsync(CancellationToken cancellationToken = default)
     {
-        var addressStr = address.DataType == 'X'
+        if (_tcpClient?.Connected == true && _writer is not null && _reader is not null)
+        {
+            _isConnected = true;
+            return;
+        }
+
+        CloseConnection();
+
+        _tcpClient = new TcpClient
+        {
+            ReceiveTimeout = (int)_options.OperationTimeout.TotalMilliseconds,
+            SendTimeout = (int)_options.OperationTimeout.TotalMilliseconds
+        };
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(_options.ConnectTimeout);
+
+        try
+        {
+            await _tcpClient.ConnectAsync(_options.IpAddress, _options.Port, cts.Token).ConfigureAwait(false);
+            
+            var stream = _tcpClient.GetStream();
+            _writer = new StreamWriter(stream) { AutoFlush = true };
+            _reader = new StreamReader(stream);
+            _isConnected = true;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new PlcConnectionFailedException($"Connection to {_options.DeviceId} ({_options.IpAddress}:{_options.Port}) timed out after {_options.ConnectTimeout.TotalSeconds}s.");
+        }
+        catch (SocketException ex)
+        {
+            throw new PlcConnectionFailedException($"Failed to connect to {_options.DeviceId} ({_options.IpAddress}:{_options.Port}): {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Formats PlcAddress to string for TCP protocol.
+    /// Example: DB1.DBX0.0 or DB1.DBW10
+    /// </summary>
+    private static string FormatAddress(PlcAddress address)
+    {
+        return address.DataType == 'X'
             ? $"DB{address.DataBlock}.DB{address.DataType}{address.Offset}.{address.BitOffset}"
             : $"DB{address.DataBlock}.DB{address.DataType}{address.Offset}";
+    }
 
-        var valueStr = value switch
+    /// <summary>
+    /// Formats value to string for TCP protocol.
+    /// </summary>
+    private static string FormatValue<T>(T value)
+    {
+        return value switch
         {
             bool b => b ? "1" : "0",
             _ => value?.ToString() ?? "0"
         };
-
-        return $"WRITE|{addressStr}|{valueStr}\n";
     }
 
     /// <summary>
-    /// Sends a request to the TCP server.
+    /// Converts a string value from TCP PLC response to the specified target type.
+    /// Handles common type conversions with performance optimization for basic types.
     /// </summary>
-    private async Task SendRequestAsync(string request, CancellationToken cancellationToken)
+    /// <typeparam name="T">Target type to convert to.</typeparam>
+    /// <param name="valueStr">String value received from PLC.</param>
+    /// <param name="dataType">PLC data type character (X, B, W, D).</param>
+    /// <returns>Converted value of type T.</returns>
+    /// <exception cref="InvalidCastException">Thrown when conversion fails.</exception>
+    private static T ConvertTo<T>(string valueStr, char dataType)
     {
-        if (_networkStream == null)
-            throw new PlcConnectionFailedException("Network stream is not available.");
+        if (string.IsNullOrEmpty(valueStr))
+            return default!;
 
-        var buffer = Encoding.UTF8.GetBytes(request);
-        await _networkStream.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
-        await _networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
+        var targetType = typeof(T);
 
-    /// <summary>
-    /// Receives a response from the TCP server.
-    /// </summary>
-    private async Task<string> ReceiveResponseAsync(CancellationToken cancellationToken)
-    {
-        if (_networkStream == null)
-            throw new PlcConnectionFailedException("Network stream is not available.");
+        // Handle common types directly for better performance
+        if (targetType == typeof(bool) && bool.TryParse(valueStr, out var boolVal))
+            return (T)(object)boolVal;
 
-        var buffer = new byte[4096];
-        var bytesRead = await _networkStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-        
-        if (bytesRead == 0)
-            throw new PlcConnectionFailedException("Connection closed by remote host.");
+        if (targetType == typeof(bool) && dataType == 'X')
+            return (T)(object)(valueStr == "1");
 
-        return Encoding.UTF8.GetString(buffer, 0, bytesRead).TrimEnd('\r', '\n');
-    }
+        if (targetType == typeof(int) && int.TryParse(valueStr, out var intVal))
+            return (T)(object)intVal;
 
-    /// <summary>
-    /// Parses a read response from the TCP server.
-    /// Expected format: OK|{value} or ERROR|{message}
-    /// </summary>
-    private static object ParseReadResponse(string response, PlcAddress address)
-    {
-        var parts = response.Split('|');
-        
-        if (parts.Length < 2)
-            throw new PlcDataFormatException($"Invalid response format: {response}");
+        if (targetType == typeof(ushort) && ushort.TryParse(valueStr, out var ushortVal))
+            return (T)(object)ushortVal;
 
-        if (parts[0] != "OK")
-            throw new PlcConnectionFailedException($"Server error: {parts[1]}");
+        if (targetType == typeof(uint) && uint.TryParse(valueStr, out var uintVal))
+            return (T)(object)uintVal;
 
-        var valueStr = parts[1];
+        if (targetType == typeof(byte) && byte.TryParse(valueStr, out var byteVal))
+            return (T)(object)byteVal;
 
-        return address.DataType switch
+        if (targetType == typeof(string))
+            return (T)(object)valueStr;
+
+        // Fallback to general conversion
+        try
         {
-            'X' => valueStr == "1" || valueStr.Equals("true", StringComparison.OrdinalIgnoreCase),
-            'B' => byte.Parse(valueStr),
-            'W' => ushort.Parse(valueStr),
-            'D' => uint.Parse(valueStr),
-            _ => throw new PlcInvalidAddressException($"Unsupported data type: {address.DataType}")
-        };
+            return (T)Convert.ChangeType(valueStr, targetType)!;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidCastException($"Cannot convert value '{valueStr}' to type '{targetType.Name}'", ex);
+        }
     }
 
     /// <summary>
-    /// Parses a write response from the TCP server.
-    /// Expected format: OK or ERROR|{message}
+    /// Closes the TCP connection and releases all related resources.
     /// </summary>
-    private static void ParseWriteResponse(string response, PlcAddress address)
+    private void CloseConnection()
     {
-        var parts = response.Split('|');
-        
-        if (parts[0] != "OK")
-            throw new PlcConnectionFailedException($"Server write error at {address}: {(parts.Length > 1 ? parts[1] : "Unknown error")}");
+        try { _reader?.Dispose(); } catch { }
+        try { _writer?.Dispose(); } catch { }
+        try { _tcpClient?.Close(); } catch { }
+        _reader = null;
+        _writer = null;
+        _tcpClient = null;
     }
 
     /// <summary>
@@ -560,9 +507,7 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
             // Suppress exceptions during disposal
         }
 
-        _networkStream?.Dispose();
-        _tcpClient?.Dispose();
         _dataStore.Clear();
-        _operationLock.Dispose();
+        _ioLock.Dispose();
     }
 }
