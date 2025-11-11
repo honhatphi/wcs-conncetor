@@ -1,6 +1,4 @@
 # Changelog API – Automation Gateway
-Cập nhật: 2025-11-10
-
 Tài liệu này ghi nhận thay đổi API công khai giữa **AutomationGatewayBase** (cũ) và **AutomationGateway** (mới).
 
 ## 1) Tổng quan thay đổi
@@ -44,14 +42,24 @@ Tài liệu này ghi nhận thay đổi API công khai giữa **AutomationGatewa
 **Mới**
 - `Task<SubmissionResult> SendCommand(TransportTask task)`
   - Trả về `SubmissionResult` với thông tin validate
+  - Hỗ trợ 4 loại command: **Inbound**, **Outbound**, **Transfer**, **CheckPallet**
 - `Task<SubmissionResult> SendMultipleCommands(IEnumerable<TransportTask> tasks)`
   - Trả về `SubmissionResult` với thông tin `Submitted`, `Rejected`, `RejectedCommands`
   - Validate toàn bộ tasks trước khi submit
   - Tasks không hợp lệ được reject với lý do cụ thể
 
+**CheckPallet Command - Mới**
+- `CommandType.CheckPallet` - Kiểm tra sự hiện diện của pallet tại vị trí
+- **Flow**: Write Source Location + Depth → Trigger → Start Process → Wait Result
+- **Result**: Trả về `PalletAvailable` hoặc `PalletUnavailable` trong `TaskSucceeded` event
+- **Alarm Behavior**: **Luôn fail ngay** khi có alarm (bỏ qua `FailOnAlarm` config)
+- **Use Case**: Kiểm tra trước khi thực hiện Outbound/Transfer operations
+
 **Cũ**
 - `Task SendCommand(TransportTask task)`
   - Không có return value (void)
+  - Chỉ hỗ trợ 3 loại command: Inbound, Outbound, Transfer
+  - **Không có CheckPallet command**
 - `Task SendMultipleCommands(List<TransportTask> tasks)`
   - Không có return value cụ thể
   - Yêu cầu tiền kiểm tra kết nối cho từng `DeviceId` trước batch (ở Base)
@@ -116,6 +124,9 @@ Tài liệu này ghi nhận thay đổi API công khai giữa **AutomationGatewa
 |------|----|----|---------|
 | Send Command | `Task SendCommand(...)` | `Task<SubmissionResult> SendCommand(...)` | Trả về validation result |
 | Batch Submit | `Task SendMultipleCommands(List)` | `Task<SubmissionResult> SendMultipleCommands(IEnumerable)` | Trả về validation result |
+| **CheckPallet** | ❌ Không có | ✅ `CommandType.CheckPallet` | **Command mới**: Kiểm tra pallet tại vị trí |
+| CheckPallet Result | - | `PalletAvailable`, `PalletUnavailable` | Trả về trong `TaskSucceeded` event |
+| CheckPallet Alarm | - | **Luôn fail** khi có alarm | Bỏ qua `FailOnAlarm` config |
 | Barcode Validation | `SendValidationResult(deviceId, taskId, ...)` | `SendValidationResult(taskId, ...) : bool` | Bỏ deviceId, timeout 5 phút |
 | Alarm Handling | Không có event | `TaskAlarm` event | Phát hiện alarm ngay lập tức |
 | Layout | Không có | `LoadWarehouseLayout(json)`, `GetWarehouseLayout()` | Validate vị trí kho |
@@ -151,6 +162,137 @@ public bool FailOnAlarm { get; init; } = false;
 - CheckPallet command luôn fail khi có alarm (bỏ qua FailOnAlarm)
 - Alarm notification chỉ raise một lần (tránh duplicate)
 
+## 4.1) CheckPallet Command - Chi tiết
+
+**Tính năng mới hoàn toàn trong phiên bản này:**
+
+### Command Type
+```csharp
+public enum CommandType
+{
+    Inbound,
+    Outbound,
+    Transfer,
+    CheckPallet  // ← MỚI
+}
+```
+
+### Cách sử dụng
+```csharp
+var checkTask = new TransportTask
+{
+    TaskId = "CHECK_001",
+    CommandType = CommandType.CheckPallet,
+    SourceLocation = new Location 
+    { 
+        Floor = 1, 
+        Rail = 2, 
+        Block = 3, 
+        Depth = 1  // Bắt buộc cho CheckPallet
+    },
+    // Không cần DestinationLocation cho CheckPallet
+};
+
+var result = await gateway.SendCommand(checkTask);
+```
+
+### Execution Flow
+1. **Write Parameters**: Source Location (Floor, Rail, Block, Depth)
+2. **Trigger Command**: Set `Req_CheckPallet` flag
+3. **Start Process**: Set `StartProcess` flag
+4. **Wait for Result**: Poll các flags:
+   - `ErrorAlarm` - Nếu true → **Fail ngay** (bỏ qua FailOnAlarm)
+   - `CommandFailed` - Nếu true → Fail
+   - `Done_CheckPallet` - Completion flag
+   - `AvailablePallet` - Pallet có tại vị trí
+   - `UnavailablePallet` - Không có pallet
+
+### Result Processing
+```csharp
+gateway.TaskSucceeded += (s, e) =>
+{
+    if (e.Result.CommandType == CommandType.CheckPallet)
+    {
+        if (e.Result.PalletAvailable)
+        {
+            Console.WriteLine("✅ Pallet found at location");
+            // Có thể tiếp tục với Outbound/Transfer
+        }
+        else if (e.Result.PalletUnavailable)
+        {
+            Console.WriteLine("❌ No pallet at location");
+            // Xử lý trường hợp không có pallet
+        }
+    }
+};
+```
+
+### Đặc điểm quan trọng
+
+**1. Alarm Behavior - Khác biệt với các command khác:**
+- ⚠️ CheckPallet **LUÔN FAIL** khi có alarm
+- ❌ **BỎ QUA** cấu hình `FailOnAlarm`
+- 🎯 **Lý do**: CheckPallet là validation step, không thể tiếp tục khi có lỗi
+
+**2. Device Capabilities:**
+```csharp
+public class DeviceCapabilities
+{
+    public bool SupportsCheckPallet { get; init; } = true;
+    // Mặc định là true, có thể tắt cho devices không hỗ trợ
+}
+```
+
+**3. Signal Map Requirements:**
+```csharp
+public class SignalMap
+{
+    // CheckPallet specific signals
+    public string PalletCheckTrigger { get; init; } = "DB1.DBX0.7";
+    public string PalletCheckCompleted { get; init; } = "DB2.DBX0.7";
+    public string AvailablePallet { get; init; } = "DB2.DBX1.0";
+    public string UnavailablePallet { get; init; } = "DB2.DBX1.1";
+}
+```
+
+### Use Cases
+
+1. **Pre-validation trước Outbound:**
+   ```csharp
+   // 1. Check pallet existence
+   await gateway.SendCommand(checkTask);
+   
+   // 2. Nếu available, thực hiện outbound
+   if (palletFound)
+   {
+       await gateway.SendCommand(outboundTask);
+   }
+   ```
+
+2. **Inventory verification:**
+   - Kiểm tra tồn kho thực tế
+   - So sánh với database
+   - Phát hiện mismatch
+
+3. **Safety check:**
+   - Đảm bảo không có pallet trước khi inbound
+   - Validate empty slot trước transfer
+
+### Migration Notes
+
+**Nếu bạn đang implement CheckPallet logic riêng:**
+1. Xóa custom check logic
+2. Sử dụng `CommandType.CheckPallet`
+3. Xử lý `PalletAvailable`/`PalletUnavailable` trong event
+4. Cấu hình `SignalMap` cho PLC signals
+
+**PLC Requirements:**
+- PLC phải implement các signals CheckPallet
+- Response time khuyến nghị: < 5 giây
+- Timeout mặc định: 30 giây (configurable)
+
+---
+
 ## 5) Điều chỉnh mã nguồn nhanh
 
 1. **Khởi tạo**: thay constructor `AutomationGatewayBase(devices, config)` bằng `AutomationGateway.Instance.Initialize(...)`.
@@ -160,7 +302,28 @@ public bool FailOnAlarm { get; init; } = false;
 4. **Queue**: nếu cần hủy lệnh pending theo ID, dùng `RemoveCommand(commandId)`.
 5. **Layout**: nạp layout bằng `LoadWarehouseLayout` trước khi gửi lệnh để hệ thống tự validate vị trí.
 6. **Mode/Recovery**: dùng `SwitchModeAsync` và `ResetDeviceStatusAsync` thay thao tác thủ công ở tầng thấp.
-7. **Alarm Handling**: Đăng ký event `TaskAlarm` và cấu hình `FailOnAlarm` theo nhu cầu:
+7. **CheckPallet**: Sử dụng `CommandType.CheckPallet` thay vì custom logic:
+   ```csharp
+   // Gửi check command
+   var checkTask = new TransportTask
+   {
+       TaskId = "CHECK_001",
+       CommandType = CommandType.CheckPallet,
+       SourceLocation = new Location { Floor = 1, Rail = 2, Block = 3, Depth = 1 }
+   };
+   await gateway.SendCommand(checkTask);
+   
+   // Xử lý kết quả
+   gateway.TaskSucceeded += (s, e) =>
+   {
+       if (e.Result.CommandType == CommandType.CheckPallet)
+       {
+           bool palletExists = e.Result.PalletAvailable;
+           // Xử lý logic dựa trên kết quả
+       }
+   };
+   ```
+8. **Alarm Handling**: Đăng ký event `TaskAlarm` và cấu hình `FailOnAlarm` theo nhu cầu:
    ```csharp
    gateway.TaskAlarm += (s, e) => {
        Logger.Log($"Alarm on {e.DeviceId} during {e.CommandId}");
@@ -174,9 +337,11 @@ public bool FailOnAlarm { get; init; } = false;
 
 ## 6) Ghi chú tương thích
 - Các enum `CommandType`, `DeviceStatus`, `Direction` giữ nguyên ý nghĩa, nhưng validation đã chuyển sang `AutomationGateway` và `WarehouseLayout`.
+- **CommandType.CheckPallet mới**: Kiểm tra pallet tại vị trí, trả về `PalletAvailable`/`PalletUnavailable`
 - Event model thống nhất qua `AutomationGateway` thay vì trải trên `BarcodeHandler/TaskDispatcher`.
 - **TaskAlarm event mới**: Phải đăng ký để nhận thông báo alarm ngay lập tức
 - **FailOnAlarm config**: Mặc định `false` (continue mode), cần set `true` cho critical operations
+- **CheckPallet exception**: Luôn fail khi có alarm, bỏ qua `FailOnAlarm` setting
 - **Barcode timeout**: Tăng từ 2 phút lên 5 phút để có thời gian xử lý validation đủ
 
 ## 7) Breaking Changes Summary
@@ -192,10 +357,18 @@ public bool FailOnAlarm { get; init; } = false;
    - Thay đổi từ `Task` → `Task<SubmissionResult>`
    - Cần xử lý result để biết tasks nào bị reject
 
-3. **Event mới: TaskAlarm**
+3. **CommandType enum mới**
+   - Thêm `CommandType.CheckPallet`
+   - Cần cập nhật switch/case xử lý CommandType nếu có
+
+4. **Event mới: TaskAlarm**
    - Phải đăng ký event handler nếu cần theo dõi alarm
    - Alarm behavior phụ thuộc vào `FailOnAlarm` config
 
-4. **Timeout thay đổi**
+5. **Timeout thay đổi**
    - Barcode validation timeout: 2 phút → **5 phút**
    - Cần review logic timeout trong client code
+
+6. **Result properties mới**
+   - `PalletAvailable` và `PalletUnavailable` trong `CommandResult`
+   - Chỉ áp dụng cho `CheckPallet` commands

@@ -145,58 +145,70 @@ sequenceDiagram
     GW->>App: TaskAlarm event
     
     alt FailOnAlarm = true (Fail Fast)
-        Note over Worker,ORC: Xử lý lỗi ngay lập tức
-        Worker->>GW: TaskFailed event
-        GW->>App: TaskFailed event (Báo lỗi)
-        App->>GW: PauseQueue() (Tạm dừng queue)
-
-        Note over App,HMI: Recovery Process (Blocking)
-        App->>HMI: Thông báo lỗi cần khắc phục
-        HMI->>PLC: Xử lý lỗi tại HMI
-        HMI->>PLC: Khắc phục sự cố thủ công
-        HMI->>PLC: Cập nhật trạng thái thiết bị
-        Note over HMI,PLC: Reset flags và status
+        rect rgb(255, 200, 200)
+            Note over Worker,ORC: ⛔ Xử lý lỗi ngay lập tức
+            Worker->>GW: TaskFailed event
+            GW->>App: TaskFailed event (Báo lỗi)
+            App->>GW: PauseQueue() (Tạm dừng queue)
+        end
+        
+        rect rgb(230, 240, 255)
+            Note over App,HMI: 🔧 Recovery Process (Blocking)
+            App->>HMI: Thông báo lỗi cần khắc phục
+            HMI->>PLC: Xử lý lỗi tại HMI
+            HMI->>PLC: Khắc phục sự cố thủ công
+            HMI->>PLC: Cập nhật trạng thái thiết bị
+            Note over HMI,PLC: Reset flags và status
+        end
         
         HMI->>App: Báo hoàn tất khắc phục
-        App->>GW: ResumeQueue()
-        Note over GW,ORC: Hệ thống tiếp tục xử lý
+        App->>GW: ResumeQueue() để tiếp tục
+        Note over GW,ORC: ✅ Hệ thống tiếp tục xử lý
         
     else FailOnAlarm = false (Continue Mode - Default)
-        Note over Worker,ORC: Tiếp tục thực thi, chờ kết quả
-        Note over Worker: Task không bị xóa, chờ PLC xử lý
+        rect rgb(255, 250, 200)
+            Note over Worker,ORC: ⚠️ Tiếp tục thực thi, chờ kết quả
+            Note over Worker: Task không bị xóa, chờ PLC xử lý
+        end
         
-        Note over App,HMI: Recovery Process (Non-blocking)
-        App->>HMI: Thông báo alarm (Warning)
-        HMI->>HMI: Theo dõi tình huống
+        rect rgb(240, 255, 240)
+            Note over App,HMI: 📢 Recovery Process (Non-blocking)
+            App->>HMI: Thông báo alarm (Warning)
+            HMI->>HMI: Theo dõi tình huống
+        end
         
         alt PLC tự khắc phục và hoàn thành
-            Note over PLC: Auto Recovery
-            PLC->>Worker: Set Completed flag = true
-            Worker->>GW: TaskSucceeded (Warning status)
-            GW->>App: TaskSucceeded event
-            Note over App: Task hoàn thành với cảnh báo
+            rect rgb(200, 255, 200)
+                Note over PLC: 🔄 Auto Recovery
+                PLC->>Worker: Set Completed flag = true
+                Worker->>GW: TaskSucceeded (Warning status)
+                GW->>App: TaskSucceeded event
+                Note over App: ✅ Task hoàn thành với cảnh báo
+            end
             
         else PLC không khắc phục được
             HMI->>PLC: Khắc phục thủ công tại HMI
             HMI->>PLC: Cập nhật kết quả
             
             alt Khắc phục thành công
-                Note over HMI,PLC: Manual Recovery Success
-                HMI->>PLC: Set Completed flag
-                PLC->>Worker: Completed flag = true
-                Worker->>GW: TaskSucceeded (Warning status)
-                GW->>App: TaskSucceeded event
-                
+                rect rgb(200, 255, 200)
+                    Note over HMI,PLC: ✅ Manual Recovery Success
+                    HMI->>PLC: Set Completed flag
+                    PLC->>Worker: Completed flag = true
+                    Worker->>GW: TaskSucceeded (Warning status)
+                    GW->>App: TaskSucceeded event
+                end
             else Không khắc phục được
-                Note over HMI,PLC: Cannot Recover
-                HMI->>PLC: Set Failed flag
-                PLC->>Worker: Failed flag = true
-                Worker->>GW: TaskFailed event
-                GW->>App: TaskFailed event
+                rect rgb(255, 200, 200)
+                    Note over HMI,PLC: ❌ Cannot Recover
+                    HMI->>PLC: Set Failed flag
+                    PLC->>Worker: Failed flag = true
+                    Worker->>GW: TaskFailed event
+                    GW->>App: TaskFailed event
+                end
             end
         end
     end
-
 ```
 
 ### 3.3.2 Workflow Chi Tiết

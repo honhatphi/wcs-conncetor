@@ -131,11 +131,3 @@ gw.LoadWarehouseLayout(layoutJson);
 var layout = gw.GetWarehouseLayout();
 Console.WriteLine(layout.ToString());
 ```
-
-## 8.11 Best practices
-- Đăng ký sự kiện **trước** khi Activate để không mất event sớm.
-- Inbound validate: khi `isValid = true` bắt buộc `destinationLocation` và `gateNumber`.
-- Không reset thiết bị khi Busy.
-- Map Exception → mã lỗi chuẩn hoá (xem `errors.md`) và log chi tiết.
-- Đặt timeout hợp lý theo loại lệnh, barcode 5 phút.
-- Không retry mù với lệnh di chuyển; chỉ retry thao tác đọc an toàn.
