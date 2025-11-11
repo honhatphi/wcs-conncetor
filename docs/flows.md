@@ -145,75 +145,63 @@ sequenceDiagram
     GW->>App: TaskAlarm event
     
     alt FailOnAlarm = true (Fail Fast)
-        rect rgb(255, 200, 200)
-            Note over Worker,ORC: ⛔ Xử lý lỗi ngay lập tức
-            Worker->>GW: TaskFailed event
-            GW->>App: TaskFailed event (Báo lỗi)
-            App->>GW: PauseQueue() (Tạm dừng queue)
-        end
-        
-        rect rgb(230, 240, 255)
-            Note over App,HMI: 🔧 Recovery Process (Blocking)
-            App->>HMI: Thông báo lỗi cần khắc phục
-            HMI->>PLC: Xử lý lỗi tại HMI
-            HMI->>PLC: Khắc phục sự cố thủ công
-            HMI->>PLC: Cập nhật trạng thái thiết bị
-            Note over HMI,PLC: Reset flags và status
-        end
+        Note over Worker,ORC: Xử lý lỗi ngay lập tức
+        Worker->>GW: TaskFailed event
+        GW->>App: TaskFailed event (Báo lỗi)
+        App->>GW: PauseQueue() (Tạm dừng queue)
+
+        Note over App,HMI: Recovery Process (Blocking)
+        App->>HMI: Thông báo lỗi cần khắc phục
+        HMI->>PLC: Xử lý lỗi tại HMI
+        HMI->>PLC: Khắc phục sự cố thủ công
+        HMI->>PLC: Cập nhật trạng thái thiết bị
+        Note over HMI,PLC: Reset flags và status
         
         HMI->>App: Báo hoàn tất khắc phục
-        App->>GW: ResumeQueue() để tiếp tục
-        Note over GW,ORC: ✅ Hệ thống tiếp tục xử lý
+        App->>GW: ResumeQueue()
+        Note over GW,ORC: Hệ thống tiếp tục xử lý
         
     else FailOnAlarm = false (Continue Mode - Default)
-        rect rgb(255, 250, 200)
-            Note over Worker,ORC: ⚠️ Tiếp tục thực thi, chờ kết quả
-            Note over Worker: Task không bị xóa, chờ PLC xử lý
-        end
+        Note over Worker,ORC: Tiếp tục thực thi, chờ kết quả
+        Note over Worker: Task không bị xóa, chờ PLC xử lý
         
-        rect rgb(240, 255, 240)
-            Note over App,HMI: 📢 Recovery Process (Non-blocking)
-            App->>HMI: Thông báo alarm (Warning)
-            HMI->>HMI: Theo dõi tình huống
-        end
+        Note over App,HMI: Recovery Process (Non-blocking)
+        App->>HMI: Thông báo alarm (Warning)
+        HMI->>HMI: Theo dõi tình huống
         
         alt PLC tự khắc phục và hoàn thành
-            rect rgb(200, 255, 200)
-                Note over PLC: 🔄 Auto Recovery
-                PLC->>Worker: Set Completed flag = true
-                Worker->>GW: TaskSucceeded (Warning status)
-                GW->>App: TaskSucceeded event
-                Note over App: ✅ Task hoàn thành với cảnh báo
-            end
+            Note over PLC: Auto Recovery
+            PLC->>Worker: Set Completed flag = true
+            Worker->>GW: TaskSucceeded (Warning status)
+            GW->>App: TaskSucceeded event
+            Note over App: Task hoàn thành với cảnh báo
             
         else PLC không khắc phục được
             HMI->>PLC: Khắc phục thủ công tại HMI
             HMI->>PLC: Cập nhật kết quả
             
             alt Khắc phục thành công
-                rect rgb(200, 255, 200)
-                    Note over HMI,PLC: ✅ Manual Recovery Success
-                    HMI->>PLC: Set Completed flag
-                    PLC->>Worker: Completed flag = true
-                    Worker->>GW: TaskSucceeded (Warning status)
-                    GW->>App: TaskSucceeded event
-                end
+                Note over HMI,PLC: Manual Recovery Success
+                HMI->>PLC: Set Completed flag
+                PLC->>Worker: Completed flag = true
+                Worker->>GW: TaskSucceeded (Warning status)
+                GW->>App: TaskSucceeded event
+                
             else Không khắc phục được
-                rect rgb(255, 200, 200)
-                    Note over HMI,PLC: ❌ Cannot Recover
-                    HMI->>PLC: Set Failed flag
-                    PLC->>Worker: Failed flag = true
-                    Worker->>GW: TaskFailed event
-                    GW->>App: TaskFailed event
-                end
+                Note over HMI,PLC: Cannot Recover
+                HMI->>PLC: Set Failed flag
+                PLC->>Worker: Failed flag = true
+                Worker->>GW: TaskFailed event
+                GW->>App: TaskFailed event
             end
         end
     end
+
 ```
 
 ### 3.3.2 Workflow Chi Tiết
 
-#### Khi FailOnAlarm = true (Fail Fast Mode):
+#### Khi FailOnAlarm = true:
 
 1. **Phát hiện Alarm**:
    - `DeviceWorker` phát hiện `ErrorAlarm = true` khi polling PLC
@@ -275,7 +263,6 @@ sequenceDiagram
 - ✅ Operations ảnh hưởng an toàn
 - ✅ Không thể chấp nhận lỗi (critical path)
 - ✅ Cần can thiệp ngay lập tức
-- ✅ Ví dụ: Check pallet, Safety gates
 
 **Khuyến nghị sử dụng FailOnAlarm = false khi:**
 - ✅ Operations có thể retry/recovery
@@ -285,9 +272,7 @@ sequenceDiagram
 
 **Lưu ý đặc biệt:**
 - 🔔 `TaskAlarm` event **luôn được raise** trong cả hai mode
-- 🚫 `CheckPallet` command **luôn fail** khi có alarm (bỏ qua cấu hình)
 - ⚠️ Alarm chỉ notify **một lần** để tránh spam
-- 🔄 Có thể thay đổi `FailOnAlarm` runtime bằng `SwitchModeAsync()`
 
 ---
 

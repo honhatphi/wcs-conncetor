@@ -4,7 +4,7 @@ Cập nhật: 2025-11-10
 Tài liệu này ghi nhận thay đổi API công khai giữa **AutomationGatewayBase** (cũ) và **AutomationGateway** (mới).
 
 ## 1) Tổng quan thay đổi
-- Chuẩn hoá **façade duy nhất**: `AutomationGateway.Instance`.
+- Chuẩn hoá **facade duy nhất**: `AutomationGateway.Instance`.
 - Bổ sung **khởi tạo từ JSON** và **tải layout kho**.
 - Đơn giản hoá **SendValidationResult**: bỏ `deviceId`, thêm `optional direction`, `nullable gate`.
 - Thêm **SwitchModeAsync** (Real ↔ Simulation) và **ResetDeviceStatusAsync** có ràng buộc trạng thái.
