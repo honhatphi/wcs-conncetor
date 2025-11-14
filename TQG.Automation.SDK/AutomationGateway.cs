@@ -23,7 +23,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     private readonly PlcRegistry _registry;
     private readonly CommandOrchestrator _orchestrator;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<BarcodeValidationResponse>> _pendingBarcodeValidations = new();
-    private readonly ILogger _logger;
+    private readonly FileLogger _logger;
     private CancellationTokenSource? _eventLoopCts;
     private Task? _eventLoopTask;
     private bool _isDisposed;
@@ -86,6 +86,12 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// Gets all registered device IDs.
     /// </summary>
     public IEnumerable<string> DeviceIds => _registry.DeviceIds;
+
+    /// <summary>
+    /// Gets all registered PLC connection options.
+    /// </summary>
+    /// <returns></returns>
+    public Dictionary<string, PlcConnectionOptions> PlcConnectionOptions => _registry.GetAllOptions();
 
     /// <summary>
     /// Initializes and registers all PLC devices from configuration.

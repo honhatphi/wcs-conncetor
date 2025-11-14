@@ -40,6 +40,8 @@ public static class PlcErrorCodeMapper
             [27] = "QR code reader timeout",
             [28] = "Timeout stop Conveyor 6 & 4 or 8 & 7",
             [29] = "QR Code read error",
+            [30] = "Inbound in progress: cannot send outbound command",
+            [31] = "Outbound in progress: cannot send inbound command",
             [100] = "Emergency stop",
             [101] = "Shuttle Servo_1 Alarm",
             [102] = "Shuttle Servo_2 Alarm",

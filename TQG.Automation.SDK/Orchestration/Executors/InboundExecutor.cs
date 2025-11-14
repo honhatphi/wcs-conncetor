@@ -46,7 +46,11 @@ internal sealed class InboundExecutor(
             await StartProcessAsync(steps, cancellationToken).ConfigureAwait(false);
 
             // Step 3: Read barcode from PLC
-            var barcode = await ReadBarcodeAsync(steps, cancellationToken).ConfigureAwait(false);
+            var barcode = await ReadBarcodeAsync(
+                command,
+                steps,
+                resultChannel,
+                cancellationToken).ConfigureAwait(false);
 
             // Step 4: Validate barcode with user
             var validationResponse = await ValidateBarcodeAsync(command, barcode, steps, cancellationToken)
@@ -97,6 +101,27 @@ internal sealed class InboundExecutor(
     }
 
     /// <summary>
+    /// Checks for alarm condition and returns error details if alarm is active.
+    /// </summary>
+    /// <returns>ErrorDetail if alarm is active, null otherwise</returns>
+    private async Task<ErrorDetail?> CheckForAlarmAsync(CancellationToken cancellationToken)
+    {
+        var errorAlarmAddress = PlcAddress.Parse(_signalMap.ErrorAlarm);
+        var hasAlarm = await _plcClient.ReadAsync<bool>(errorAlarmAddress, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!hasAlarm)
+            return null;
+
+        var errorCodeAddress = PlcAddress.Parse(_signalMap.ErrorCode);
+        var errorCode = await _plcClient.ReadAsync<int>(errorCodeAddress, cancellationToken)
+            .ConfigureAwait(false);
+
+        var errorMessage = PlcErrorCodeMapper.GetMessage(errorCode);
+        return new ErrorDetail(errorCode, errorMessage);
+    }
+
+    /// <summary>
     /// Triggers the INBOUND command execution.
     /// </summary>
     private async Task TriggerCommandAsync(List<string> steps, CancellationToken cancellationToken)
@@ -125,16 +150,49 @@ internal sealed class InboundExecutor(
     /// Polls until barcode != "0000000000" or timeout.
     /// Each character is a single digit (0-9).
     /// </summary>
-    private async Task<string> ReadBarcodeAsync(List<string> steps, CancellationToken cancellationToken)
+    private async Task<string> ReadBarcodeAsync(
+        CommandEnvelope command,
+        List<string> steps,
+        Channel<CommandResult> resultChannel,
+        CancellationToken cancellationToken)
     {
         var pollInterval = TimeSpan.FromMilliseconds(500);
         var startTime = DateTimeOffset.UtcNow;
         var defaultBarcode = "0000000000";
+        var alarmNotificationSent = false;
 
         steps.Add("Waiting for barcode...");
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Check for alarm
+            var errorDetail = await CheckForAlarmAsync(cancellationToken).ConfigureAwait(false);
+            if (errorDetail != null)
+            {
+                steps.Add($"Error Code: {errorDetail.ErrorCode} - {errorDetail.ErrorMessage}");
+
+                // Send immediate alarm notification to result channel (only once)
+                if (!alarmNotificationSent)
+                {
+                    alarmNotificationSent = true;
+                    var alarmNotification = new CommandResult
+                    {
+                        CommandId = command.CommandId,
+                        PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+                        Status = ExecutionStatus.Error,
+                        Message = $"⚠️ Alarm detected during execution: {errorDetail}",
+                        StartedAt = startTime,
+                        CompletedAt = DateTimeOffset.UtcNow,
+                        PlcError = errorDetail
+                    };
+
+                    await resultChannel.Writer.WriteAsync(alarmNotification, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    steps.Add("Sent alarm notification to result channel");
+                }
+            }
+
             var barcodeChars = new List<string>(10);
 
             // Read all 10 barcode characters
@@ -157,7 +215,7 @@ internal sealed class InboundExecutor(
                     steps.Add($"Stopped at position {i + 1}: character has length {charValue.Length} ('{charValue}'). Using {i} characters collected.");
                     break;
                 }
-                
+
                 barcodeChars.Add(charValue);
             }
 
@@ -268,7 +326,7 @@ internal sealed class InboundExecutor(
                _signalMap.BarcodeInvalid,
                false,
                steps,
-               "Wrote BarcodeInvalid flag (true)",
+               "Wrote BarcodeInvalid flag (false)",
                cancellationToken).ConfigureAwait(false);
         }
         else
@@ -284,7 +342,7 @@ internal sealed class InboundExecutor(
                 _signalMap.BarcodeValid,
                 false,
                 steps,
-                "Wrote BarcodeValid flag (true)",
+                "Wrote BarcodeValid flag (false)",
                 cancellationToken).ConfigureAwait(false);
         }
     }
@@ -344,8 +402,6 @@ internal sealed class InboundExecutor(
         List<string> steps,
         CancellationToken cancellationToken)
     {
-        var errorAlarmAddress = PlcAddress.Parse(_signalMap.ErrorAlarm);
-        var errorCodeAddress = PlcAddress.Parse(_signalMap.ErrorCode);
         var commandFailedAddress = PlcAddress.Parse(_signalMap.CommandFailed);
         var completionAddress = PlcAddress.Parse(_signalMap.InboundCompleted);
         var pollInterval = TimeSpan.FromMilliseconds(500);
@@ -356,24 +412,17 @@ internal sealed class InboundExecutor(
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            // Check ErrorAlarm flag
-            var hasAlarm = await _plcClient.ReadAsync<bool>(errorAlarmAddress, cancellationToken)
-                .ConfigureAwait(false);
+            // Check for alarm
+            var errorDetail = await CheckForAlarmAsync(cancellationToken).ConfigureAwait(false);
 
-            if (hasAlarm && !alarmDetected)
+            if (errorDetail != null && !alarmDetected)
             {
                 alarmDetected = true;
                 var elapsed = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
                 steps.Add($"⚠️ Alarm detected after {elapsed:F0}ms");
+                steps.Add($"Error Code: {errorDetail.ErrorCode} - {errorDetail.ErrorMessage}");
 
-                // Read error code from PLC
-                var errorCode = await _plcClient.ReadAsync<int>(errorCodeAddress, cancellationToken)
-                    .ConfigureAwait(false);
-
-                var errorMessage = PlcErrorCodeMapper.GetMessage(errorCode);
-                steps.Add($"Error Code: {errorCode} - {errorMessage}");
-
-                detectedError = new ErrorDetail(errorCode, errorMessage);
+                detectedError = errorDetail;
 
                 // Send immediate alarm notification to result channel (only once)
                 if (!alarmNotificationSent)
@@ -392,7 +441,7 @@ internal sealed class InboundExecutor(
 
                     await resultChannel.Writer.WriteAsync(alarmNotification, cancellationToken)
                         .ConfigureAwait(false);
-                    
+
                     steps.Add("Sent alarm notification to result channel");
                 }
 
