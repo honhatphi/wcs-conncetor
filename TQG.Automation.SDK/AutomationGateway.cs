@@ -468,12 +468,20 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <summary>
     /// Submits one or more commands to the orchestration queue for scheduling and execution.
     /// Commands are matched to available devices and executed sequentially per device.
+    /// All commands must be valid before any are submitted - if any command fails validation, none are added to the queue.
+    /// 
+    /// Queue state validation rules:
+    /// - If INBOUND commands exist in queue/processing → Cannot submit OUTBOUND (but can submit more INBOUND)
+    /// - If OUTBOUND commands exist in queue/processing → Cannot submit INBOUND (but can submit more OUTBOUND)
+    /// - TRANSFER commands can always be submitted (no restrictions)
+    /// - CHECKPALLET commands can only be submitted when queue is completely empty (no pending or processing)
     /// </summary>
     /// <param name="requests">Collection of command requests to submit.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Submission result with accepted/rejected counts.</returns>
     /// <exception cref="ArgumentNullException">Thrown when requests is null.</exception>
     /// <exception cref="InvalidOperationException">Thrown when gateway is not initialized.</exception>
+    /// <exception cref="ArgumentException">Thrown when any command fails validation - no commands will be submitted.</exception>
     public Task<SubmissionResult> SendMultipleCommands(
         IEnumerable<TransportTask> requests,
         CancellationToken cancellationToken = default)
@@ -500,23 +508,41 @@ public sealed class AutomationGateway : IAsyncDisposable
                 };
             }
 
-            var submitted = 0;
-            var rejected = new List<RejectCommand>();
+            // Get current queue state for validation
+            var pendingCommands = _orchestrator.GetPendingCommands();
+            var processingCommands = _orchestrator.GetProcessingCommands();
+            var allActiveCommands = pendingCommands.Concat(processingCommands).ToList();
 
+            // Step 1: Validate ALL commands first (including queue state rules)
+            var rejected = new List<RejectCommand>();
             foreach (var request in requestList)
             {
-                // Validate and map to internal envelope
-                var validationError = ValidateCommandRequest(request);
+                var validationError = ValidateCommandRequest(request, allActiveCommands);
                 if (validationError != null)
                 {
                     _logger.LogWarning($"Command validation failed - TaskId: {request.TaskId}, Reason: {validationError}");
                     rejected.Add(new RejectCommand(request, validationError));
-                    continue;
                 }
+            }
 
+            // If any validation failed, reject all and don't submit anything
+            if (rejected.Count > 0)
+            {
+                _logger.LogError($"Validation failed for {rejected.Count} command(s) - no commands will be submitted");
+                return new SubmissionResult
+                {
+                    Submitted = 0,
+                    Rejected = rejected.Count,
+                    RejectedCommands = rejected
+                };
+            }
+
+            // Step 2: All valid - now submit to queue
+            var submitted = 0;
+            foreach (var request in requestList)
+            {
                 var envelope = MapToEnvelope(request);
 
-                // Submit to orchestrator
                 var success = await _orchestrator.SubmitCommandAsync(envelope, cancellationToken)
                     .ConfigureAwait(false);
 
@@ -922,16 +948,66 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <summary>
     /// Validates a command request and returns error message if invalid.
     /// Uses warehouse layout configuration for location validation.
+    /// 
+    /// Location requirements:
     /// - Inbound: No location validation required (DestinationLocation provided via barcode validation)
     /// - Outbound: Requires SourceLocation
     /// - Transfer: Requires both SourceLocation and DestinationLocation
     /// - CheckPallet: Requires SourceLocation with valid depth
+    /// 
+    /// Queue state rules:
+    /// - If INBOUND exists → Cannot submit OUTBOUND
+    /// - If OUTBOUND exists → Cannot submit INBOUND
+    /// - TRANSFER can always be submitted
+    /// - CHECKPALLET requires empty queue
     /// </summary>
-    private string? ValidateCommandRequest(TransportTask request)
+    /// <param name="request">The command request to validate.</param>
+    /// <param name="activeCommands">Current active commands in queue and processing.</param>
+    private string? ValidateCommandRequest(TransportTask request, List<CommandInfo>? activeCommands = null)
     {
         // Validate CommandType (enum is always valid unless default/undefined)
         if (!Enum.IsDefined(typeof(CommandType), request.CommandType))
             return $"Invalid CommandType: {request.CommandType}";
+
+        // Validate queue state rules (if activeCommands provided)
+        if (activeCommands != null && activeCommands.Count > 0)
+        {
+            var hasInbound = activeCommands.Any(c => c.CommandType == CommandType.Inbound);
+            var hasOutbound = activeCommands.Any(c => c.CommandType == CommandType.Outbound);
+
+            switch (request.CommandType)
+            {
+                case CommandType.Inbound:
+                    if (hasOutbound)
+                    {
+                        _logger.LogWarning($"Cannot submit INBOUND command - OUTBOUND commands are currently active in queue");
+                        return "Cannot submit INBOUND commands while OUTBOUND commands are in queue or processing";
+                    }
+                    break;
+
+                case CommandType.Outbound:
+                    if (hasInbound)
+                    {
+                        _logger.LogWarning($"Cannot submit OUTBOUND command - INBOUND commands are currently active in queue");
+                        return "Cannot submit OUTBOUND commands while INBOUND commands are in queue or processing";
+                    }
+                    break;
+
+                case CommandType.CheckPallet:
+                    // CheckPallet requires completely empty queue
+                    _logger.LogWarning($"Cannot submit CHECKPALLET command - queue is not empty ({activeCommands.Count} active commands)");
+                    return "CHECKPALLET commands can only be submitted when the queue is completely empty";
+
+                case CommandType.Transfer:
+                    // Transfer has no restrictions
+                    break;
+            }
+        }
+        else if (activeCommands != null && activeCommands.Count == 0 && request.CommandType == CommandType.CheckPallet)
+        {
+            // Queue is empty, CheckPallet is allowed
+            // Continue to location validation
+        }
 
         // Validate locations based on command type
         switch (request.CommandType)

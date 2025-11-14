@@ -57,8 +57,8 @@
 | 27 | QR code reader timeout |
 | 28 | Timeout stop Conveyor 6 & 4 or 8 & 7 |
 | 29 | QR Code read error |
-| 30 | Cannot start OUTBOUND while INBOUND is in progress |
-| 31 | Cannot start INBOUND while OUTBOUND is in progress |
+| 30 | Cannot send OUTBOUND while INBOUND is in progress |
+| 31 | Cannot send INBOUND command while OUTBOUND is in progress |
 | 100 | Emergency stop |
 | 101 | Shuttle Servo_1 Alarm |
 | 102 | Shuttle Servo_2 Alarm |
