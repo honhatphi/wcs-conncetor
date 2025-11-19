@@ -107,23 +107,16 @@ gw.ResumeQueue();
 
 bool paused = gw.IsPauseQueue;
 bool removed = gw.RemoveCommand("t1");
-// Nếu có API xóa nhiều lệnh:
-int count = gw.RemoveCommands(new [] { "t2", "t3" });
+// Xóa nhiều lệnh:
+int count = gw.RemoveTransportTasks(new [] { "t2", "t3" });
 ```
 
-## 8.8 Switch sang Simulation và quay lại Real
-```csharp
-await gw.SwitchModeAsync("Shuttle01", PlcMode.Simulation);
-// … chạy kiểm thử
-await gw.SwitchModeAsync("Shuttle01", PlcMode.Real);
-```
-
-## 8.9 Reset thiết bị lỗi
+## 8.8 Reset thiết bị lỗi
 ```csharp
 var resetOk = await gw.ResetDeviceStatusAsync("Shuttle01");
 ```
 
-## 8.10 Load Layout kho
+## 8.9 Load Layout kho
 ```csharp
 var layoutJson = File.ReadAllText("warehouse-layout.json");
 gw.LoadWarehouseLayout(layoutJson);

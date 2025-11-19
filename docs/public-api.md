@@ -54,9 +54,8 @@ Task<bool> SendValidationResult(
     int? gateNumber = null);
 ```
 
-### Chế độ kết nối & phục hồi
+### Phục hồi thiết bị
 ```csharp
-Task SwitchModeAsync(string deviceId, PlcMode newMode, CancellationToken ct = default);
 Task<bool> ResetDeviceStatusAsync(string deviceId);
 ```
 

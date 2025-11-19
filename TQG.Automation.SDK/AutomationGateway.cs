@@ -160,55 +160,6 @@ public sealed class AutomationGateway : IAsyncDisposable
     }
 
     /// <summary>
-    /// Switches the connection mode for a specific device (Real ↔ Emulated).
-    /// </summary>
-    /// <param name="deviceId">Unique device identifier.</param>
-    /// <param name="newMode">The new connection mode.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <exception cref="ArgumentException">Thrown when deviceId is invalid.</exception>
-    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found or mode switch fails.</exception>
-    public async Task SwitchModeAsync(
-        string deviceId,
-        PlcMode newMode,
-        CancellationToken cancellationToken = default)
-    {
-        _logger.LogInformation($"SwitchModeAsync called - DeviceId: {deviceId}, NewMode: {newMode}");
-        ObjectDisposedException.ThrowIf(_isDisposed, this);
-        ValidateDeviceId(deviceId);
-
-        var oldManager = await _registry.GetManagerAsync(deviceId).ConfigureAwait(false);
-        var oldOptions = oldManager.Options;
-
-        // Check if mode is already set
-        if (oldOptions.Mode == newMode)
-        {
-            _logger.LogInformation($"Device {deviceId} already in {newMode} mode - no action needed");
-            return;
-        }
-
-        // Disconnect old connection
-        await oldManager.DisconnectAsync().ConfigureAwait(false);
-
-        // Create new options with updated mode
-        var newOptions = oldOptions with { Mode = newMode };
-
-        // Create new client and manager
-        var newClient = PlcClientFactory.Create(newOptions);
-        var newManager = new PlcConnectionManager(newClient, newOptions);
-
-        // Connect new client
-        await newManager.ConnectAsync(cancellationToken).ConfigureAwait(false);
-
-        // Replace in registry
-        var replacedManager = await _registry.ReplaceAsync(deviceId, newManager).ConfigureAwait(false);
-
-        // Dispose old manager
-        await replacedManager.DisposeAsync().ConfigureAwait(false);
-        
-        _logger.LogInformation($"Device {deviceId} successfully switched from {oldOptions.Mode} to {newMode}");
-    }
-
-    /// <summary>
     /// Gets the connection status for a specific device.
     /// </summary>
     /// <param name="deviceId">Unique device identifier.</param>

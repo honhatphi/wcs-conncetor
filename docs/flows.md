@@ -26,101 +26,165 @@ SDK hỗ trợ hai chế độ xử lý alarm thông qua cấu hình `FailOnAlar
 ## 3.1 Outbound/Transfer – Tổng quát
 ```mermaid
 sequenceDiagram
-  participant App as Client App
-  participant GW as AutomationGateway
-  participant ORC as Orchestrator
-  participant W as Device Worker
-  participant PLC as PLC
+    participant App as Client App
+    participant GW as AutomationGateway
+    participant ORC as Orchestrator
+    participant W as Device Worker
+    participant PLC as PLC
 
-  App->>GW: SendCommand(task)
-  GW->>ORC: Validate + Enqueue(envelope)
-  ORC->>W: Assign when device Idle
-  W->>PLC: Write command + params
-  PLC-->>W: Status progress
-  
-  alt Alarm Detected (ErrorAlarm = true)
-    W-->>GW: TaskAlarm (immediate notification)
-    GW-->>App: TaskAlarm event
-    
-    alt FailOnAlarm = true
-      W-->>GW: TaskFailed
-      GW-->>App: TaskFailed event
-    else FailOnAlarm = false
-      Note over W,PLC: Continue execution despite alarm
-      alt Command Completed (Completed flag)
-        W-->>GW: TaskSucceeded (Warning status)
-        GW-->>App: TaskSucceeded event
-      else Command Failed (Failed flag)
-        W-->>GW: TaskFailed
-        GW-->>App: TaskFailed event
-      end
+    rect rgb(230, 240, 255)
+        Note over App,ORC: 📨 Nhận lệnh & đưa vào hàng đợi
+        App->>GW: SendCommand(task)
+        GW->>ORC: Validate + Enqueue(envelope)
+        ORC->>W: Assign when device Idle
     end
-  else No Alarm
-    alt Success
-      W-->>GW: TaskSucceeded
-      GW-->>App: TaskSucceeded event
-    else Fail
-      W-->>GW: TaskFailed
-      GW-->>App: TaskFailed event
+
+    rect rgb(240, 255, 240)
+        Note over W,PLC: 🔁 Gửi lệnh xuống PLC
+        W->>PLC: Write command + params
+        PLC-->>W: Status progress
     end
-  end
+
+    alt Alarm Detected (ErrorAlarm = true)
+        rect rgb(255, 230, 230)
+            Note over W,GW: 🚨 Phát hiện Alarm trong quá trình thực thi
+            W-->>GW: TaskAlarm (immediate notification)
+            GW-->>App: TaskAlarm event
+        end
+
+        alt FailOnAlarm = true (Fail Fast)
+            rect rgb(255, 200, 200)
+                Note over W,App: ⛔ Dừng task ngay khi có alarm
+                W-->>GW: TaskFailed
+                GW-->>App: TaskFailed event
+            end
+        else FailOnAlarm = false (Continue Mode)
+            rect rgb(255, 250, 200)
+                Note over W,PLC: ⚠️ Tiếp tục thực thi dù có alarm
+                Note over W: Task vẫn giữ, chờ kết quả Completed/Failed
+            end
+
+            alt Command Completed (Completed flag)
+                rect rgb(200, 255, 200)
+                    Note over PLC,App: ✅ Hoàn thành nhưng có cảnh báo
+                    W-->>GW: TaskSucceeded (Warning status)
+                    GW-->>App: TaskSucceeded event
+                end
+            else Command Failed (Failed flag)
+                rect rgb(255, 200, 200)
+                    Note over PLC,App: ❌ Hoàn thành với trạng thái Failed
+                    W-->>GW: TaskFailed
+                    GW-->>App: TaskFailed event
+                end
+            end
+        end
+    else No Alarm
+        rect rgb(230, 255, 230)
+            Note over W,App: ✔ Luồng bình thường, không có alarm
+            alt Success
+                W-->>GW: TaskSucceeded
+                GW-->>App: TaskSucceeded event
+            else Fail
+                W-->>GW: TaskFailed
+                GW-->>App: TaskFailed event
+            end
+        end
+    end
 ```
 
 ## 3.2 Inbound với Barcode Validation
 ```mermaid
 sequenceDiagram
-  participant App as Client App
-  participant GW as AutomationGateway
-  participant ORC as Orchestrator
-  participant W as Inbound Worker
-  participant PLC as PLC
+    participant App as Client App
+    participant GW as AutomationGateway
+    participant ORC as Orchestrator
+    participant W as Inbound Worker
+    participant PLC as PLC
 
-  App->>GW: SendCommand(inbound)
-  GW->>ORC: Enqueue
-  ORC->>W: Assign when device Idle
-  W->>PLC: Start scan
-  PLC-->>GW: Barcode read → BarcodeReceived
-  GW-->>App: BarcodeReceived event
-  App->>GW: SendValidationResult(taskId, isValid[, dest, dir, gate])
-  
-  alt isValid == true
-    GW->>W: Deliver validation (dest + gate + dir)
-    W->>PLC: Write validation flags + parameters
-    W->>PLC: Continue execution
-    
-    alt Alarm Detected (ErrorAlarm = true)
-      W-->>GW: TaskAlarm (immediate notification)
-      GW-->>App: TaskAlarm event
-      
-      alt FailOnAlarm = true
-        W-->>GW: TaskFailed
-        GW-->>App: TaskFailed event
-      else FailOnAlarm = false
-        Note over W,PLC: Continue execution despite alarm
-        alt Command Completed (InboundCompleted flag)
-          W-->>GW: TaskSucceeded (Warning status)
-          GW-->>App: TaskSucceeded event
-        else Command Failed (Failed flag)
-          W-->>GW: TaskFailed
-          GW-->>App: TaskFailed event
-        end
-      end
-    else No Alarm
-      alt Success
-        PLC-->>W: InboundCompleted
-        W-->>GW: TaskSucceeded
-        GW-->>App: TaskSucceeded event
-      else Fail
-        PLC-->>W: CommandFailed
-        W-->>GW: TaskFailed
-        GW-->>App: TaskFailed event
-      end
+    rect rgb(230, 240, 255)
+        Note over App,ORC: 📨 Nhận lệnh inbound & gán thiết bị
+        App->>GW: SendCommand(inbound)
+        GW->>ORC: Enqueue
+        ORC->>W: Assign when device Idle
     end
-  else isValid == false OR Timeout (5 minutes)
-    W->>PLC: Write rejection flags
-    W-->>GW: TaskFailed
-    GW-->>App: TaskFailed event
-  end
+
+    rect rgb(240, 255, 240)
+        Note over W,PLC: 🔍 Quét mã & đọc barcode
+        W->>PLC: Start scan
+        PLC-->>GW: Barcode read → BarcodeReceived
+        GW-->>App: BarcodeReceived event
+    end
+
+    rect rgb(255, 250, 200)
+        Note over App,W: ✅/❌ App Validate barcode
+        App->>GW: SendValidationResult(taskId, isValid[, dest, dir, gate])
+    end
+
+    alt isValid == true
+        rect rgb(230, 255, 230)
+            Note over GW,PLC: 🔁 Gửi kết quả validate cho PLC
+            GW->>W: Deliver validation (dest + gate + dir)
+            W->>PLC: Write validation flags + parameters
+            W->>PLC: Continue execution
+        end
+
+        alt Alarm Detected (ErrorAlarm = true)
+            rect rgb(255, 230, 230)
+                Note over W,GW: 🚨 Alarm trong quá trình inbound
+                W-->>GW: TaskAlarm (immediate notification)
+                GW-->>App: TaskAlarm event
+            end
+
+            alt FailOnAlarm = true (Fail Fast)
+                rect rgb(255, 200, 200)
+                    Note over W,App: ⛔ Dừng task ngay khi có alarm
+                    W-->>GW: TaskFailed
+                    GW-->>App: TaskFailed event
+                end
+            else FailOnAlarm = false (Continue Mode)
+                rect rgb(255, 250, 200)
+                    Note over W,PLC: ⚠️ Tiếp tục thực thi dù có alarm
+                    Note over W: Task vẫn giữ, chờ PLC kết luận
+                end
+
+                alt Command Completed (InboundCompleted flag)
+                    rect rgb(200, 255, 200)
+                        Note over PLC,App: ✅ Hoàn thành nhưng có cảnh báo
+                        PLC-->>W: InboundCompleted
+                        W-->>GW: TaskSucceeded (Warning status)
+                        GW-->>App: TaskSucceeded event
+                    end
+                else Command Failed (Failed flag)
+                    rect rgb(255, 200, 200)
+                        Note over PLC,App: ❌ Hoàn thành với trạng thái Failed
+                        PLC-->>W: Failed flag
+                        W-->>GW: TaskFailed
+                        GW-->>App: TaskFailed event
+                    end
+                end
+            end
+        else No Alarm
+            rect rgb(230, 255, 230)
+                Note over PLC,App: ✔ Luồng bình thường, không có alarm
+                alt Success
+                    PLC-->>W: InboundCompleted
+                    W-->>GW: TaskSucceeded
+                    GW-->>App: TaskSucceeded event
+                else Fail
+                    PLC-->>W: CommandFailed
+                    W-->>GW: TaskFailed
+                    GW-->>App: TaskFailed event
+                end
+            end
+        end
+    else isValid == false OR Timeout (5 minutes)
+        rect rgb(255, 220, 220)
+            Note over W,PLC: 🚫 Reject vì invalid/timeout
+            W->>PLC: Write rejection flags
+            W-->>GW: TaskFailed
+            GW-->>App: TaskFailed event
+        end
+    end
 ```
 
 ## 3.3 Error Recovery & Alarm Handling
@@ -296,20 +360,4 @@ flowchart LR
   R[ResumeQueue] -->|IsPauseQueue = false| ORC
 ```
 
-## 3.5 SwitchMode Runtime
-```mermaid
-sequenceDiagram
-  participant App
-  participant GW
-  participant REG as Registry
-  participant MGR as Old Manager
-  participant MGR2 as New Manager
-
-  App->>GW: SwitchModeAsync(device, Real/Simulation)
-  GW->>REG: Get Manager(device)
-  REG-->>GW: MGR
-  GW->>MGR: Disconnect
-  GW->>REG: Replace with MGR2(new mode)
-  GW->>MGR2: Connect + Verify link
-  GW-->>App: Done
-```
+## 3.5 Device Recovery Flow

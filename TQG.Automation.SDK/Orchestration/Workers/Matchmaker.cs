@@ -435,6 +435,8 @@ internal sealed class Matchmaker
     {
         var deviceChannel = _channels.GetOrCreateDeviceChannel(targetDevice);
 
+        command = command with { PlcDeviceId = targetDevice };
+
         try
         {
             await deviceChannel.Writer.WriteAsync(command, cancellationToken)

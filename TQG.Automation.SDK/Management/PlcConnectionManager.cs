@@ -16,6 +16,7 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
 
     private PeriodicTimer? _healthCheckTimer;
     private Task? _healthCheckTask;
+    private CancellationTokenSource? _healthCheckCts;
     private bool _isDisposed;
     private int _reconnectAttempts;
 
@@ -150,8 +151,9 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
         if (_healthCheckTimer != null)
             return;
 
+        _healthCheckCts = new CancellationTokenSource();
         _healthCheckTimer = new PeriodicTimer(_options.HealthCheckInterval);
-        _healthCheckTask = Task.Run(HealthCheckLoopAsync, _disposalCts.Token);
+        _healthCheckTask = Task.Run(() => HealthCheckLoopAsync(_healthCheckCts.Token), CancellationToken.None);
     }
 
     /// <summary>
@@ -159,55 +161,70 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
     /// </summary>
     private async Task StopHealthMonitoringAsync()
     {
-        if (_healthCheckTimer == null)
+        if (_healthCheckTimer == null || _healthCheckTask == null)
             return;
 
+        // Cancel the health check loop
+        _healthCheckCts?.Cancel();
+
+        // Dispose timer to unblock WaitForNextTickAsync
         _healthCheckTimer.Dispose();
-        _healthCheckTimer = null;
 
-        if (_healthCheckTask != null)
+        // Wait for task to complete
+        try
         {
-            try
-            {
-                await _healthCheckTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Ignore timeout
-            }
-
-            _healthCheckTask = null;
+            await _healthCheckTask.ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            // Expected when cancellation is triggered
+        }
+        catch
+        {
+            // Ignore other exceptions during shutdown
+        }
+
+        _healthCheckCts?.Dispose();
+        _healthCheckCts = null;
+        _healthCheckTimer = null;
+        _healthCheckTask = null;
     }
 
     /// <summary>
     /// Background loop for periodic health checks and automatic reconnection.
     /// </summary>
-    private async Task HealthCheckLoopAsync()
+    private async Task HealthCheckLoopAsync(CancellationToken cancellationToken)
     {
-        while (!_disposalCts.Token.IsCancellationRequested && _healthCheckTimer != null)
+        try
         {
-            try
+            while (!cancellationToken.IsCancellationRequested && _healthCheckTimer != null)
             {
-                await _healthCheckTimer.WaitForNextTickAsync(_disposalCts.Token).ConfigureAwait(false);
-
-                if (_disposalCts.Token.IsCancellationRequested)
-                    break;
-
-                // Check connection status
-                if (!_client.IsConnected)
+                try
                 {
-                    await AttemptReconnectAsync().ConfigureAwait(false);
+                    await _healthCheckTimer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false);
+
+                    if (cancellationToken.IsCancellationRequested)
+                        break;
+
+                    // Check connection status
+                    if (!_client.IsConnected)
+                    {
+                        await AttemptReconnectAsync().ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // Suppress exceptions in background task
                 }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch
-            {
-                // Suppress exceptions in background task
-            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
         }
     }
 

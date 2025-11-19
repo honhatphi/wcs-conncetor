@@ -5,7 +5,7 @@ Tài liệu này ghi nhận thay đổi public API giữa **AutomationGatewayBas
 - Chuẩn hoá **facade duy nhất**: `AutomationGateway.Instance`.
 - Bổ sung **khởi tạo từ JSON** và **tải layout kho**.
 - Đơn giản hoá **SendValidationResult**: bỏ `deviceId`, thêm `optional direction`, `nullable gate`.
-- Thêm **SwitchModeAsync** (Real ↔ Simulation) và **ResetDeviceStatusAsync** có ràng buộc trạng thái.
+- Thêm **ResetDeviceStatusAsync** có ràng buộc trạng thái.
 - Chuẩn hoá **Pause/Resume/IsPauseQueue** và **RemoveCommand**.
 - Mở rộng API **truy vấn thiết bị**: `DeviceIds`, `DeviceCount`, `IsInitialized`.
 
@@ -85,13 +85,12 @@ Tài liệu này ghi nhận thay đổi public API giữa **AutomationGatewayBas
 - `Task<Location?> GetActualLocationAsync(string deviceId)`
 - Có thêm `Task<List<DeviceInfo>> GetIdleDevicesAsync()` ở Base (KHÔNG còn public ở bản mới).
 
-### 2.6 Chế độ kết nối & Phục hồi
+### 2.6 Phục hồi thiết bị
 **Mới**
-- `Task SwitchModeAsync(string deviceId, PlcMode newMode, CancellationToken ct = default)` — chuyển Real/Simulation runtime
 - `Task<bool> ResetDeviceStatusAsync(string deviceId)` — chặn khi Busy, raise recovery orchestration
 
 **Cũ**
-- Khả năng reset/monitor phân tán theo `DeviceMonitor`, không có `SwitchModeAsync` runtime.
+- Khả năng reset/monitor phân tán theo `DeviceMonitor`, không có API centralized.
 
 ### 2.7 Sự kiện
 **Mới**
@@ -117,7 +116,6 @@ Tài liệu này ghi nhận thay đổi public API giữa **AutomationGatewayBas
 | Barcode Validation | `SendValidationResult(deviceId, taskId, ...)` | `SendValidationResult(taskId, ...) : bool` | Bỏ deviceId, timeout 5 phút |
 | Alarm Handling | Không có event | `TaskAlarm` event | Phát hiện alarm ngay lập tức |
 | Layout | Không có | `LoadWarehouseLayout(json)`, `GetWarehouseLayout()` | Validate vị trí kho |
-| Mode | Không có | `SwitchModeAsync(deviceId, PlcMode)` | Real ↔ Emulated runtime |
 | Recovery | Reset rải rác | `ResetDeviceStatusAsync(deviceId) : bool` | Centralized recovery |
 
 ## 4) Alarm Handling - FailOnAlarm Configuration
@@ -157,7 +155,7 @@ public bool FailOnAlarm { get; init; } = false;
 3. **Batch**: thay `List<TransportTask>` thành `IEnumerable<TransportTask>` và xử lý `SubmissionResult` trả về.
 4. **Queue**: nếu cần hủy lệnh pending theo ID, dùng `RemoveCommand(commandId)`.
 5. **Layout**: nạp layout bằng `LoadWarehouseLayout` trước khi gửi lệnh để hệ thống tự validate vị trí.
-6. **Mode/Recovery**: dùng `SwitchModeAsync` và `ResetDeviceStatusAsync` thay thao tác thủ công ở tầng thấp.
+6. **Recovery**: dùng `ResetDeviceStatusAsync` để phục hồi thiết bị lỗi thay thao tác thủ công ở tầng thấp.
 7. **Alarm Handling**: Đăng ký event `TaskAlarm` và cấu hình `FailOnAlarm` theo nhu cầu:
    ```csharp
    gateway.TaskAlarm += (s, e) => {
