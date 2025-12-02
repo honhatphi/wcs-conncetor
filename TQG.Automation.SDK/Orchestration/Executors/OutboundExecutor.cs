@@ -148,7 +148,7 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
         var errorCodeAddress = PlcAddress.Parse(_signalMap.ErrorCode);
         var commandFailedAddress = PlcAddress.Parse(_signalMap.CommandFailed);
         var completionAddress = PlcAddress.Parse(_signalMap.OutboundCompleted);
-        var pollInterval = TimeSpan.FromMilliseconds(500);
+        var pollInterval = TimeSpan.FromMilliseconds(200);
         var startTime = DateTimeOffset.UtcNow;
         var alarmDetected = false;
         var alarmNotificationSent = false;

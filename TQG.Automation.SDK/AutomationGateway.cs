@@ -766,7 +766,13 @@ public sealed class AutomationGateway : IAsyncDisposable
                         notification.PlcDeviceId,
                         notification.CommandId,
                         notification.PlcError);
-                    _logger.LogWarning($"EVENT: TaskAlarm raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}, ErrorCode: {notification.PlcError.ErrorCode}, ErrorMessage: {notification.PlcError.ErrorMessage}");
+
+                    _logger.LogWarning($"EVENT: TaskAlarm raised - TaskId: {notification.CommandId}," +
+                        $" DeviceId: {notification.PlcDeviceId}," +
+                        $" ErrorCode: {notification.PlcError.ErrorCode}," +
+                        $" ErrorMessage: {notification.PlcError.ErrorMessage}," +
+                        $" Steps: {notification.Data}");
+
                     TaskAlarm?.Invoke(this, eventArgsAlarm);
                 }
                 return;
@@ -783,7 +789,12 @@ public sealed class AutomationGateway : IAsyncDisposable
             {
                 var error = notification.PlcError ?? new ErrorDetail(-1, notification.Message ?? "Exception");
                 var eventArgsFailed = new TaskFailedEventArgs(notification.PlcDeviceId, notification.CommandId, error);
-                _logger.LogError($"EVENT: TaskFailed raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}, ErrorCode: {error.ErrorCode}, ErrorMessage: {error.ErrorMessage}");
+                _logger.LogError($"EVENT: TaskFailed raised - TaskId: {notification.CommandId}," +
+                    $" DeviceId: {notification.PlcDeviceId}," +
+                    $" ErrorCode: {error.ErrorCode}," +
+                    $" ErrorMessage: {error.ErrorMessage}," +
+                    $" Steps: {notification.Data}");
+
                 TaskFailed?.Invoke(this, eventArgsFailed);
             }
         }
@@ -892,7 +903,8 @@ public sealed class AutomationGateway : IAsyncDisposable
             Message = result.Message,
             CompletedAt = result.CompletedAt,
             Duration = result.Duration,
-            PlcError = result.PlcError
+            PlcError = result.PlcError,
+            Data = result.Data
         };
     }
 

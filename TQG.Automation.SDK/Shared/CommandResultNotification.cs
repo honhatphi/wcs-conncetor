@@ -42,4 +42,9 @@ public sealed record CommandResultNotification
     /// Contains error code and descriptive message.
     /// </summary>
     public ErrorDetail? PlcError { get; init; }
+
+    /// <summary>
+    /// Optional: PLC-specific data returned during execution.
+    /// </summary>
+    public object? Data { get; init; }
 }

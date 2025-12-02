@@ -128,7 +128,7 @@ internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
         var completionAddress = PlcAddress.Parse(_signalMap.PalletCheckCompleted);
         var availableAddress = PlcAddress.Parse(_signalMap.AvailablePallet);
         var unavailableAddress = PlcAddress.Parse(_signalMap.UnavailablePallet);
-        var pollInterval = TimeSpan.FromMilliseconds(500);
+        var pollInterval = TimeSpan.FromMilliseconds(200);
         var startTime = DateTimeOffset.UtcNow;
 
         while (!cancellationToken.IsCancellationRequested)
