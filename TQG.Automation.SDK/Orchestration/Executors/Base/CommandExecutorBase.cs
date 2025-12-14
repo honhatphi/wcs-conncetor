@@ -1,33 +1,51 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
-using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Orchestration.Executors.Strategies;
 using TQG.Automation.SDK.Orchestration.Services;
 using TQG.Automation.SDK.Shared;
+using Models = TQG.Automation.SDK.Orchestration.Models;
 
-namespace TQG.Automation.SDK.Orchestration.Executors;
+namespace TQG.Automation.SDK.Orchestration.Executors.Base;
 
 /// <summary>
-/// Executes INBOUND commands: handles incoming material flow to warehouse.
-/// Flow: Trigger → Start Process → Read Barcode → Validate → Write Parameters → Wait for Result.
-/// Signal monitoring runs continuously throughout the entire execution process.
+/// Base executor using Template Method pattern with Signal Monitor.
+/// Provides common execution flow for all command types:
+/// 1. Validate command
+/// 2. Start signal monitoring (background)
+/// 3. Execute pre-trigger logic (optional)
+/// 4. Write parameters
+/// 5. Trigger command
+/// 6. Start process
+/// 7. Execute post-trigger logic (optional)
+/// 8. Wait for completion signal
 /// </summary>
-internal sealed class InboundExecutor(
-    IPlcClient plcClient,
-    SignalMap signalMap,
-    bool failOnAlarm,
-    Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
+internal abstract class CommandExecutorBase
 {
-    private readonly IPlcClient _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
-    private readonly SignalMap _signalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
-    private readonly bool _failOnAlarm = failOnAlarm;
-    private readonly InboundStrategy _strategy = new(barcodeValidationCallback);
-    private readonly SignalMonitorService _signalMonitor = new(plcClient, signalMap);
+    protected readonly IPlcClient PlcClient;
+    protected readonly SignalMap SignalMap;
+    protected readonly bool FailOnAlarm;
+    protected readonly SignalMonitorService SignalMonitor;
+
+    protected CommandExecutorBase(
+        IPlcClient plcClient,
+        SignalMap signalMap,
+        bool failOnAlarm)
+    {
+        PlcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
+        SignalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
+        FailOnAlarm = failOnAlarm;
+        SignalMonitor = new SignalMonitorService(plcClient, signalMap);
+    }
 
     /// <summary>
-    /// Executes an INBOUND command with continuous signal monitoring.
-    /// Signal monitoring detects Alarm, CommandFailed, and InboundCompleted in parallel with execution.
+    /// Gets the strategy for this executor.
+    /// </summary>
+    protected abstract ICommandStrategy Strategy { get; }
+
+    /// <summary>
+    /// Template method for executing commands.
+    /// Runs signal monitoring in parallel with main execution flow.
     /// </summary>
     public async Task<Models.CommandExecutionResult> ExecuteAsync(
         Models.CommandEnvelope command,
@@ -35,12 +53,12 @@ internal sealed class InboundExecutor(
         CancellationToken cancellationToken)
     {
         // Validate command
-        _strategy.ValidateCommand(command);
+        Strategy.ValidateCommand(command);
 
         var steps = new List<string>();
         var startTime = DateTimeOffset.UtcNow;
 
-        // Create linked cancellation token for signal monitoring
+        // Create linked cancellation for signal monitoring
         using var signalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var linkedToken = signalCts.Token;
 
@@ -49,22 +67,22 @@ internal sealed class InboundExecutor(
         {
             CommandId = command.CommandId,
             PlcDeviceId = command.PlcDeviceId ?? "Unknown",
-            CompletionSignalAddress = _strategy.GetCompletionAddress(_signalMap),
+            CompletionSignalAddress = Strategy.GetCompletionAddress(SignalMap),
             ResultChannel = resultChannel,
             Steps = steps,
             StartTime = startTime,
-            FailOnAlarm = _failOnAlarm
+            FailOnAlarm = FailOnAlarm
         };
 
         // Start background signal monitoring
-        var monitorTask = _signalMonitor.MonitorSignalsAsync(monitorContext, signalCts, cancellationToken);
+        var monitorTask = SignalMonitor.MonitorSignalsAsync(monitorContext, signalCts, cancellationToken);
 
         try
         {
-            // Execute all steps with linked token
-            var executionTask = ExecuteStepsAsync(command, resultChannel, steps, linkedToken);
+            // Execute main flow with linked token
+            var executionTask = ExecuteMainFlowAsync(command, resultChannel, steps, linkedToken);
 
-            // Wait for either execution to complete or signal detection
+            // Wait for either completion or signal detection
             var completedTask = await Task.WhenAny(executionTask, monitorTask).ConfigureAwait(false);
 
             if (completedTask == monitorTask)
@@ -77,7 +95,7 @@ internal sealed class InboundExecutor(
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            // Cancelled by signal monitor - get the detected signal
+            // Cancelled by signal monitor
             var signal = await GetDetectedSignalAsync(monitorTask).ConfigureAwait(false);
             if (signal != null && signal.Type != Models.SignalType.None)
             {
@@ -93,7 +111,7 @@ internal sealed class InboundExecutor(
         {
             steps.Add($"Error: {ex.Message}");
             return Models.CommandExecutionResult.Error(
-                $"INBOUND execution failed: {ex.Message}",
+                $"{Strategy.SupportedCommandType} execution failed: {ex.Message}",
                 steps);
         }
         finally
@@ -111,51 +129,77 @@ internal sealed class InboundExecutor(
     }
 
     /// <summary>
-    /// Executes all INBOUND steps sequentially.
+    /// Main execution flow - can be overridden for special cases.
     /// </summary>
-    private async Task<Models.CommandExecutionResult> ExecuteStepsAsync(
+    protected virtual async Task<Models.CommandExecutionResult> ExecuteMainFlowAsync(
         Models.CommandEnvelope command,
         Channel<Models.CommandResult> resultChannel,
         List<string> steps,
         CancellationToken cancellationToken)
     {
-        // Step 1: Trigger INBOUND command
-        await _plcClient.TriggerAsync(
-            _strategy.GetTriggerAddress(_signalMap),
-            steps,
-            "INBOUND command",
-            cancellationToken).ConfigureAwait(false);
+        // Pre-trigger logic (optional)
+        var preResult = await Strategy.ExecutePreTriggerAsync(
+            PlcClient, SignalMap, command, resultChannel, steps, cancellationToken)
+            .ConfigureAwait(false);
+        if (preResult != null) return preResult;
 
-        // Step 2: Start process execution
-        await _plcClient.TriggerAsync(
-            _signalMap.StartProcess,
-            steps,
-            "process execution",
-            cancellationToken).ConfigureAwait(false);
-
-        // Step 3: Execute post-trigger logic (barcode read, validate, write params)
-        var postTriggerResult = await _strategy.ExecutePostTriggerAsync(
-            _plcClient, _signalMap, command, resultChannel, steps, cancellationToken)
+        // Write parameters
+        await Strategy.WriteParametersAsync(
+            PlcClient, SignalMap, command, steps, cancellationToken)
             .ConfigureAwait(false);
 
-        // If barcode was rejected, return early
-        if (postTriggerResult != null)
-        {
-            return postTriggerResult;
-        }
+        // Trigger command
+        await TriggerCommandAsync(steps, cancellationToken).ConfigureAwait(false);
 
-        // Step 4: Wait for completion (handled by signal monitor, this is backup loop)
-        return await WaitForCompletionBackupAsync(cancellationToken).ConfigureAwait(false);
+        // Start process
+        await StartProcessAsync(steps, cancellationToken).ConfigureAwait(false);
+
+        // Post-trigger logic (optional, e.g., barcode reading for Inbound)
+        var postResult = await Strategy.ExecutePostTriggerAsync(
+            PlcClient, SignalMap, command, resultChannel, steps, cancellationToken)
+            .ConfigureAwait(false);
+        if (postResult != null) return postResult;
+
+        // Wait for completion (handled by signal monitor, this is backup)
+        return await WaitForCompletionAsync(command, steps, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Backup wait loop - Signal monitor handles completion detection.
+    /// Triggers the command on PLC.
     /// </summary>
-    private static async Task<Models.CommandExecutionResult> WaitForCompletionBackupAsync(
+    protected async Task TriggerCommandAsync(List<string> steps, CancellationToken cancellationToken)
+    {
+        await PlcClient.TriggerAsync(
+            Strategy.GetTriggerAddress(SignalMap),
+            steps,
+            $"{Strategy.SupportedCommandType} command",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts process execution on PLC.
+    /// </summary>
+    protected async Task StartProcessAsync(List<string> steps, CancellationToken cancellationToken)
+    {
+        await PlcClient.TriggerAsync(
+            SignalMap.StartProcess,
+            steps,
+            "process execution",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Backup wait loop - signal monitor typically handles completion detection.
+    /// </summary>
+    protected virtual async Task<Models.CommandExecutionResult> WaitForCompletionAsync(
+        Models.CommandEnvelope command,
+        List<string> steps,
         CancellationToken cancellationToken)
     {
         var pollInterval = TimeSpan.FromMilliseconds(500);
 
+        // Keep waiting until signal monitor detects completion or cancellation
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
@@ -174,16 +218,18 @@ internal sealed class InboundExecutor(
         List<string> steps,
         DateTimeOffset startTime)
     {
+        var elapsed = (signal.DetectedAt - startTime).TotalMilliseconds;
+
         return signal.Type switch
         {
             Models.SignalType.CommandCompleted => signal.Error != null
                 ? Models.CommandExecutionResult.Warning(
-                    _strategy.BuildSuccessMessage(command, hasWarning: true), steps)
+                    Strategy.BuildSuccessMessage(command, hasWarning: true), steps)
                 : Models.CommandExecutionResult.Success(
-                    _strategy.BuildSuccessMessage(command, hasWarning: false), steps),
+                    Strategy.BuildSuccessMessage(command, hasWarning: false), steps),
 
             Models.SignalType.CommandFailed => Models.CommandExecutionResult.Failed(
-                _strategy.BuildFailureMessage(command, signal.Error),
+                Strategy.BuildFailureMessage(command, signal.Error),
                 steps,
                 signal.Error),
 
