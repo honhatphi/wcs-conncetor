@@ -932,44 +932,12 @@ public sealed class AutomationGateway : IAsyncDisposable
         if (!Enum.IsDefined(typeof(CommandType), request.CommandType))
             return $"Invalid CommandType: {request.CommandType}";
 
-        // Validate queue state rules (if activeCommands provided)
-        if (activeCommands != null && activeCommands.Count > 0)
+        // Note: Queue state rules (Inbound/Outbound conflict) are now handled by Matchmaker during scheduling
+        // CheckPallet validation
+        if (activeCommands != null && activeCommands.Count > 0 && request.CommandType == CommandType.CheckPallet)
         {
-            var hasInbound = activeCommands.Any(c => c.CommandType == CommandType.Inbound);
-            var hasOutbound = activeCommands.Any(c => c.CommandType == CommandType.Outbound);
-
-            switch (request.CommandType)
-            {
-                case CommandType.Inbound:
-                    if (hasOutbound)
-                    {
-                        _logger.LogWarning($"Cannot submit INBOUND command - OUTBOUND commands are currently active in queue");
-                        return "Cannot submit INBOUND commands while OUTBOUND commands are in queue or processing";
-                    }
-                    break;
-
-                case CommandType.Outbound:
-                    if (hasInbound)
-                    {
-                        _logger.LogWarning($"Cannot submit OUTBOUND command - INBOUND commands are currently active in queue");
-                        return "Cannot submit OUTBOUND commands while INBOUND commands are in queue or processing";
-                    }
-                    break;
-
-                case CommandType.CheckPallet:
-                    // CheckPallet requires completely empty queue
-                    _logger.LogWarning($"Cannot submit CHECKPALLET command - queue is not empty ({activeCommands.Count} active commands)");
-                    return "CHECKPALLET commands can only be submitted when the queue is completely empty";
-
-                case CommandType.Transfer:
-                    // Transfer has no restrictions
-                    break;
-            }
-        }
-        else if (activeCommands != null && activeCommands.Count == 0 && request.CommandType == CommandType.CheckPallet)
-        {
-            // Queue is empty, CheckPallet is allowed
-            // Continue to location validation
+            _logger.LogWarning($"Cannot submit CHECKPALLET command - queue is not empty ({activeCommands.Count} active commands)");
+            return "CHECKPALLET commands can only be submitted when the queue is completely empty";
         }
 
         // Validate locations based on command type

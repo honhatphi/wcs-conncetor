@@ -270,12 +270,23 @@ internal sealed class Matchmaker
     /// <summary>
     /// Finds matching device for a command.
     /// Returns device ID and index if found, otherwise indicates no match.
-    /// Considers device capabilities when matching.
+    /// Considers device capabilities and Inbound/Outbound conflict rules.
+    /// 
+    /// Conflict Rules:
+    /// - Cannot dispatch Inbound to any device if another device is processing Outbound
+    /// - Cannot dispatch Outbound to any device if another device is processing Inbound
+    /// - Transfer commands only go to devices that support Transfer
     /// </summary>
     private DeviceMatchResult TryFindMatchingDevice(
         CommandEnvelope command,
         List<string> availableDevices)
     {
+        // Check Inbound/Outbound conflict across all devices
+        if (!CanDispatchCommandType(command.CommandType))
+        {
+            return DeviceMatchResult.NotFound;
+        }
+
         if (HasDeviceAffinity(command))
         {
             // Device-specific command: must use specified device
@@ -315,6 +326,42 @@ internal sealed class Matchmaker
             // No compatible device available
             return DeviceMatchResult.NotFound;
         }
+    }
+
+    /// <summary>
+    /// Checks if a command type can be dispatched based on current processing state.
+    /// 
+    /// Rules:
+    /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
+    /// - If any device is processing Outbound → cannot dispatch Inbound (must wait)
+    /// - Transfer and CheckPallet have no cross-device restrictions
+    /// </summary>
+    private bool CanDispatchCommandType(CommandType commandType)
+    {
+        // Transfer and CheckPallet have no cross-device restrictions
+        if (commandType == CommandType.Transfer || commandType == CommandType.CheckPallet)
+        {
+            return true;
+        }
+
+        // Get all currently processing commands
+        var processingCommands = _tracker.GetProcessingCommands().ToList();
+        
+        if (processingCommands.Count == 0)
+        {
+            return true; // No conflicts possible
+        }
+
+        // Check for Inbound/Outbound conflict
+        var hasProcessingInbound = processingCommands.Any(c => c.CommandType == CommandType.Inbound);
+        var hasProcessingOutbound = processingCommands.Any(c => c.CommandType == CommandType.Outbound);
+
+        return commandType switch
+        {
+            CommandType.Inbound => !hasProcessingOutbound,  // Cannot dispatch Inbound if Outbound is processing
+            CommandType.Outbound => !hasProcessingInbound,  // Cannot dispatch Outbound if Inbound is processing
+            _ => true
+        };
     }
 
     /// <summary>

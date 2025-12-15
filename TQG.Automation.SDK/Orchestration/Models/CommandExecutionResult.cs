@@ -1,5 +1,6 @@
-namespace TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Shared;
+
+namespace TQG.Automation.SDK.Orchestration.Models;
 
 /// <summary>
 /// Result of command execution with detailed steps.

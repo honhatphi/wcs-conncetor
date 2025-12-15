@@ -11,6 +11,7 @@ public static class PlcErrorCodeMapper
     public static readonly IReadOnlyDictionary<int, string> Messages =
         new Dictionary<int, string>
         {
+            // Shuttle errors (1-12)
             [1] = "Shuttle Lift Time Over",
             [2] = "Speed not set",
             [3] = "Shuttle Stop Time Over",
@@ -22,29 +23,54 @@ public static class PlcErrorCodeMapper
             [9] = "Shuttle lost connection",
             [10] = "Pallet input location is full",
             [11] = "RFID reader connection lost",
-            [12] = "Pallet not detected at pick location",
+            [12] = "Pallet not detected Location to be picked",
+            
+            // Elevator & Conveyor errors (13-29)
             [13] = "Elevator Stop Time Over",
             [14] = "Elevator coordinate limit exceeded",
-            [15] = "Warning: Pallet not meeting requirements",
+            [15] = "Warning Pallet not meeting requirements",
             [16] = "Conveyor Lift Motor Error",
-            [17] = "Gate No. 1 opening/closing time over",
-            [18] = "Gate No. 2 opening/closing time over",
+            [17] = "Gate No. 1 opening/closing time is over",
+            [18] = "Gate No. 2 opening/closing time is over",
             [19] = "No Pallet Detected on Elevator",
             [20] = "Invalid input/output location",
             [21] = "Can't control Shuttle",
-            [22] = "Check position: Shuttle is not in correct position",
-            [23] = "Shuttle not on Elevator",
-            [24] = "Manual mode: required floor must be current floor",
+            [22] = "Check position, Shuttle is not in correct position Source",
+            [23] = "Shuttle not on elevator",
+            [24] = "Man mode, Error floor required is current floor",
             [25] = "Inverter Error",
             [26] = "Elevator reaches travel limit",
-            [27] = "QR code reader timeout",
-            [28] = "Timeout stop Conveyor 6 & 4 or 8 & 7",
-            [29] = "QR Code read error",
-            [30] = "Cannot send OUTBOUND while INBOUND is in progress",
-            [31] = "Cannot send INBOUND command while OUTBOUND is in progress",
+            [27] = "Timeout QRcode reader",
+            [28] = "Time out stop Conveyor 6 & 4 or 8 &7",
+            [29] = "Sai mã qr code",
+            [30] = "đang nhập không nhận lệnh xuất",
+            [31] = "đang xuất không nhận lệnh nhập",
+            [32] = "Warning Pallet in Conveyor 5",
+            
+            // Emergency stop
             [100] = "Emergency stop",
+            
+            // Servo alarms (101-102)
             [101] = "Shuttle Servo_1 Alarm",
             [102] = "Shuttle Servo_2 Alarm",
+            
+            // Extended Shuttle errors (1001-1012)
+            [1001] = "Shuttle Lift Time Over",
+            [1002] = "Speed not set",
+            [1003] = "Shuttle Stop Time Over",
+            [1004] = "Shuttle Not Matching Block",
+            [1005] = "Encountered an obstacle while changing lanes",
+            [1006] = "Floor mismatch",
+            [1007] = "Target location does not match",
+            [1008] = "Shuttle not in Elevator",
+            [1009] = "Shuttle lost connection",
+            [1010] = "Pallet input location is full",
+            [1011] = "RFID reader connection lost",
+            [1012] = "Pallet not detected Location to be picked",
+            
+            // Extended Servo alarms (1101-1102)
+            [1101] = "Shuttle Servo_1 Alarm",
+            [1102] = "Shuttle Servo_2 Alarm",
         };
 
     /// <summary>
