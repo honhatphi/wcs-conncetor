@@ -23,20 +23,22 @@
 | Code | Message | Mô tả |
 |------|---------|-------|
 | 32 | Warning Pallet in Conveyor 5 | Cảnh báo pallet trên băng tải xuất |
-| 1001 | Shuttle Lift Time Over | Extended - Shuttle nâng quá thời gian |
-| 1002 | Speed not set | Extended - Chưa cài đặt tốc độ |
-| 1003 | Shuttle Stop Time Over | Extended - Shuttle dừng quá thời gian |
-| 1004 | Shuttle Not Matching Block | Extended - Shuttle không khớp block |
-| 1005 | Encountered an obstacle while changing lanes | Extended - Gặp vật cản khi chuyển làn |
-| 1006 | Floor mismatch | Extended - Không khớp tầng |
-| 1007 | Target location does not match | Extended - Vị trí đích không khớp |
-| 1008 | Shuttle not in Elevator | Extended - Shuttle không trong thang máy |
-| 1009 | Shuttle lost connection | Extended - Shuttle mất kết nối |
-| 1010 | Pallet input location is full | Extended - Vị trí nhập pallet đã đầy |
-| 1011 | RFID reader connection lost | Extended - Mất kết nối đầu đọc RFID |
-| 1012 | Pallet not detected Location to be picked | Extended - Không phát hiện pallet tại vị trí lấy |
-| 1101 | Shuttle Servo_1 Alarm | Extended - Báo động Servo 1 |
-| 1102 | Shuttle Servo_2 Alarm | Extended - Báo động Servo 2 |
+
+### Quy tắc phân phối lệnh
+
+| Đang xử lý | Lệnh cần gửi | Kết quả |
+|------------|--------------|---------|
+| **Chuyển** | Bất kỳ | ❌ Chờ |
+| Bất kỳ | **Chuyển** | ❌ Chờ |
+| Nhập | Nhập | ✅ Cho phép |
+| Nhập | Xuất | ❌ Chờ |
+| Xuất | Xuất | ✅ Cho phép |
+| Xuất | Nhập | ❌ Chờ |
+| Không có | Bất kỳ | ✅ Cho phép |
+
+**Tóm tắt:**
+- **Chuyển** là lệnh đơn, không chạy cùng với lệnh khác.
+- **Nhập/Xuất** không được chạy đồng thời nhưng có thể chạy song song cùng loại (2 lệnh Nhập hoặc 2 lệnh Xuất)
 
 ---
 

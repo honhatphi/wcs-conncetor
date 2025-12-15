@@ -33,49 +33,86 @@ TQG Automation SDK là thư viện .NET 8.0 để xây dựng hệ thống đi�
 
 ```
 TQG.Automation.SDK/
-├── AutomationGateway.cs              # Singleton entry point
+├── AutomationGateway.cs              # Singleton entry point - Public API
+├── TQG.Automation.SDK.csproj         # Project file (.NET 8.0)
+│
 ├── Clients/                           # PLC client implementations
-│   ├── IPlcClient.cs
-│   ├── S7PlcClient.cs                 # Siemens S7 protocol
-│   └── TcpEmulatedPlcClient.cs        # TCP emulator
+│   ├── S7PlcClient.cs                 # Siemens S7 protocol client
+│   ├── TcpEmulatedPlcClient.cs        # TCP emulator for testing
+│   └── PlcClientExtensions.cs         # Extension methods
+│
+├── Core/                              # Core abstractions
+│   ├── IPlcClient.cs                  # PLC client interface
+│   ├── PlcAddress.cs                  # Address parsing utilities
+│   ├── PlcErrorCodeMapper.cs          # Error code to message mapping
+│   └── PlcMode.cs                     # Real/Emulated mode enum
+│
 ├── Orchestration/                     # Command processing engine
 │   ├── Core/
 │   │   └── CommandOrchestrator.cs     # Main orchestrator
-│   ├── Executors/                     # Command executors
+│   ├── Executors/                     # Command executors by type
 │   │   ├── InboundExecutor.cs         # Inbound + barcode validation
 │   │   ├── OutboundExecutor.cs        # Outbound flow
 │   │   ├── TransferExecutor.cs        # Transfer flow
-│   │   └── CheckExecutor.cs           # Check flow
+│   │   ├── CheckExecutor.cs           # CheckPallet flow
+│   │   ├── Base/                      # Base executor classes
+│   │   └── Strategies/                # Executor strategies
 │   ├── Workers/                       # Background workers
 │   │   ├── DeviceWorker.cs            # Device-specific task queue
-│   │   ├── Matchmaker.cs              # Command-Device matching
+│   │   ├── Matchmaker.cs              # Command-Device matching + dispatch rules
 │   │   └── ReplyHub.cs                # PLC feedback handler
-│   └── Infrastructure/                # Internal utilities
-│       ├── OrchestratorChannels.cs    # Channel definitions
-│       └── PendingCommandTracker.cs   # In-flight command tracking
-├── Logging/                           # Logging system
-│   ├── ILogger.cs
-│   ├── FileLogger.cs
-│   ├── LogLevel.cs
-│   └── LoggerConfiguration.cs
+│   ├── Models/                        # Internal models
+│   │   ├── CommandEnvelope.cs         # Internal command wrapper
+│   │   ├── CommandResult.cs           # Execution result
+│   │   ├── ExecutionStatus.cs         # Status enum
+│   │   └── SignalMonitorContext.cs    # Signal monitoring
+│   ├── Infrastructure/                # Internal utilities
+│   │   ├── OrchestratorChannels.cs    # Channel definitions
+│   │   ├── PendingCommandTracker.cs   # In-flight command tracking
+│   │   └── AsyncManualResetEvent.cs   # Async synchronization
+│   └── Services/
+│       └── SignalMonitorService.cs    # PLC signal monitoring
+│
+├── Configuration/                     # Configuration models
+│   ├── PlcGatewayConfiguration.cs     # Gateway config
+│   └── WarehouseLayout.cs             # Warehouse layout validation
+│
 ├── Management/                        # PLC connection management
-│   ├── PlcConnectionManager.cs
-│   ├── PlcRegistry.cs
-│   └── PlcClientFactory.cs
-├── Events/                            # Event args
+│   ├── PlcConnectionManager.cs        # Connection lifecycle
+│   ├── PlcRegistry.cs                 # Device registry
+│   └── PlcClientFactory.cs            # Client factory
+│
+├── Events/                            # Event args for callbacks
 │   ├── TaskSucceededEventArgs.cs
 │   ├── TaskFailedEventArgs.cs
 │   ├── TaskAlarmEventArgs.cs
 │   └── BarcodeReceivedEventArgs.cs
-├── Shared/                            # Public models
-│   ├── TransportTask.cs
-│   ├── SubmissionResult.cs
-│   ├── CommandType.cs
-│   ├── DeviceStatus.cs
-│   └── PlcConnectionOptions.cs
-└── Configuration/
-    ├── WarehouseLayout.cs
-    └── PlcGatewayConfiguration.cs
+│
+├── Exceptions/                        # Custom exceptions
+│   ├── PlcException.cs                # Base exception
+│   ├── PlcConnectionFailedException.cs
+│   ├── PlcDataFormatException.cs
+│   ├── PlcInvalidAddressException.cs
+│   └── TimeoutException.cs
+│
+├── Shared/                            # Public DTOs & models
+│   ├── TransportTask.cs               # Command request model
+│   ├── SubmissionResult.cs            # Submission response
+│   ├── CommandType.cs                 # Inbound/Outbound/Transfer/CheckPallet
+│   ├── CommandStatus.cs               # Success/Failed/Error
+│   ├── DeviceStatus.cs                # Idle/Busy/Error
+│   ├── DeviceStatistics.cs            # Device statistics
+│   ├── Location.cs                    # Warehouse location
+│   ├── Direction.cs                   # Enter/Exit direction
+│   ├── PlcConnectionOptions.cs        # Connection config
+│   ├── SignalMap.cs                   # PLC signal addresses
+│   └── ErrorDetail.cs                 # Error information
+│
+└── Logging/                           # Logging system
+    ├── ILogger.cs                     # Logger interface
+    ├── FileLogger.cs                  # File-based implementation
+    ├── LogLevel.cs                    # Log levels
+    └── LoggerConfiguration.cs         # Logger config
 ```
 
 ---
@@ -140,16 +177,36 @@ WCS/WMS
    ↓
 AutomationGateway.SendCommand()
    ↓
-CommandOrchestrator → Matchmaker → DeviceWorker
+ValidateCommandRequest (data validation only)
    ↓
-Executor (Inbound/Outbound/Transfer/Check)
+CommandOrchestrator.SubmitCommandAsync()
+   ↓
+Matchmaker (dispatch rules + device matching)
+   ↓
+DeviceWorker
+   ↓
+Executor (Inbound/Outbound/Transfer/CheckPallet)
    ↓
 PlcClient (S7 or Emulated)
    ↓
 PLC Device
 ```
 
-### 3. Event Flow
+### 3. Dispatch Rules (Matchmaker)
+
+| Đang xử lý | Lệnh cần gửi | Kết quả |
+|------------|--------------|---------|
+| Transfer/CheckPallet | Bất kỳ | ❌ Chờ |
+| Bất kỳ | Transfer/CheckPallet | ❌ Chờ |
+| Inbound | Outbound | ❌ Chờ |
+| Outbound | Inbound | ❌ Chờ |
+| Inbound | Inbound | ✅ Cho phép |
+| Outbound | Outbound | ✅ Cho phép |
+| Không có | Bất kỳ | ✅ Cho phép |
+
+> **Note**: Delay 2 giây giữa các lệnh liên tiếp (lệnh đầu tiên không delay)
+
+### 4. Event Flow
 
 ```
 PLC Device → ReplyHub → Executor → AutomationGateway
@@ -159,7 +216,7 @@ TaskSucceeded / TaskFailed / TaskAlarm / BarcodeReceived
 WCS/WMS Event Handlers
 ```
 
-### 4. Key Design Patterns
+### 5. Key Design Patterns
 
 - **Singleton**: AutomationGateway, PlcRegistry
 - **Factory**: PlcClientFactory
@@ -172,8 +229,11 @@ WCS/WMS Event Handlers
 ## Documentation
 
 - **[API Usage Guide](./docs/README.md)**: Hướng dẫn sử dụng API chi tiết với examples
-- **[CHANGELOG.md](./docs/CHANGELOG.md)**: So sánh API cũ vs API mới
+- **[CHANGELOG.md](./docs/CHANGELOG.md)**: Lịch sử thay đổi API
+- **[CHANGELOG-2025-12.md](./docs/CHANGELOG-2025-12.md)**: Changelog tháng 12/2025
+- **[CHANGELOG-2025-12-2.md](./docs/CHANGELOG-2025-12-2.md)**: Changelog tuần 2 tháng 12/2025
 - **[flows.md](./docs/flows.md)**: Sequence diagrams cho các luồng xử lý
+- **[errors.md](./docs/errors.md)**: Danh sách mã lỗi PLC
 
 ---
 

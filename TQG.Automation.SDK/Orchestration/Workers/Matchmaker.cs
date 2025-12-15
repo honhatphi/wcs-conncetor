@@ -18,10 +18,15 @@ internal sealed class Matchmaker
     private readonly Dictionary<string, DeviceCapabilities> _deviceCapabilities;
 
     /// <summary>
-    /// Delay between dispatching commands to consecutive devices to stagger workload.
-    /// Set to 0 to disable staggering (dispatch all devices immediately).
+    /// Delay between dispatching commands to stagger workload.
+    /// Applied between consecutive dispatches regardless of iteration.
     /// </summary>
     private readonly TimeSpan _dispatchStaggerDelay = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Tracks the last dispatch time to enforce delay between consecutive commands.
+    /// </summary>
+    private DateTimeOffset _lastDispatchTime = DateTimeOffset.MinValue;
 
     public Matchmaker(
         OrchestratorChannels channels,
@@ -220,8 +225,6 @@ internal sealed class Matchmaker
         List<string> availableDevices,
         CancellationToken cancellationToken)
     {
-        bool hasDispatchedInThisIteration = false;
-
         while (pendingCommands.Count > 0 && availableDevices.Count > 0)
         {
             var command = pendingCommands.Peek();
@@ -244,16 +247,13 @@ internal sealed class Matchmaker
             pendingCommands.Dequeue();
             availableDevices.RemoveAt(matchResult.DeviceIndex);
 
-            // Apply stagger delay (except for first dispatch)
-            if (hasDispatchedInThisIteration)
-            {
-                await ApplyDispatchStaggerDelayAsync(
-                    command,
-                    matchResult.DeviceId,
-                    matchResult.DeviceIndex,
-                    availableDevices,
-                    cancellationToken).ConfigureAwait(false);
-            }
+            // Apply stagger delay between consecutive dispatches (across all iterations)
+            await ApplyDispatchStaggerDelayAsync(
+                command,
+                matchResult.DeviceId,
+                matchResult.DeviceIndex,
+                availableDevices,
+                cancellationToken).ConfigureAwait(false);
 
             // Mark and dispatch
             _tracker.MarkAsProcessing(command.CommandId, matchResult.DeviceId);
@@ -263,7 +263,8 @@ internal sealed class Matchmaker
                 pendingCommands,
                 cancellationToken).ConfigureAwait(false);
 
-            hasDispatchedInThisIteration = true;
+            // Update last dispatch time
+            _lastDispatchTime = DateTimeOffset.UtcNow;
         }
     }
 
@@ -332,24 +333,33 @@ internal sealed class Matchmaker
     /// Checks if a command type can be dispatched based on current processing state.
     /// 
     /// Rules:
+    /// - If any device is processing Transfer or CheckPallet → cannot dispatch ANY command (must wait)
+    /// - If dispatching Transfer or CheckPallet → no other command can be processing (must wait)
     /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
     /// - If any device is processing Outbound → cannot dispatch Inbound (must wait)
-    /// - Transfer and CheckPallet have no cross-device restrictions
     /// </summary>
     private bool CanDispatchCommandType(CommandType commandType)
     {
-        // Transfer and CheckPallet have no cross-device restrictions
-        if (commandType == CommandType.Transfer || commandType == CommandType.CheckPallet)
-        {
-            return true;
-        }
-
         // Get all currently processing commands
         var processingCommands = _tracker.GetProcessingCommands().ToList();
         
         if (processingCommands.Count == 0)
         {
             return true; // No conflicts possible
+        }
+
+        // Rule: If Transfer or CheckPallet is processing → block ALL commands
+        var hasProcessingTransfer = processingCommands.Any(c => c.CommandType == CommandType.Transfer);
+        var hasProcessingCheckPallet = processingCommands.Any(c => c.CommandType == CommandType.CheckPallet);
+        if (hasProcessingTransfer || hasProcessingCheckPallet)
+        {
+            return false; // Cannot dispatch any command while Transfer/CheckPallet is running
+        }
+
+        // Rule: If dispatching Transfer or CheckPallet → no other command can be processing
+        if (commandType == CommandType.Transfer || commandType == CommandType.CheckPallet)
+        {
+            return false; // Cannot dispatch Transfer/CheckPallet while any command is running
         }
 
         // Check for Inbound/Outbound conflict
@@ -380,7 +390,8 @@ internal sealed class Matchmaker
     }
 
     /// <summary>
-    /// Applies stagger delay between device dispatches to avoid overwhelming devices.
+    /// Applies stagger delay between consecutive dispatches to avoid overwhelming devices.
+    /// First command has no delay, subsequent commands always delay 2s.
     /// Rolls back on cancellation.
     /// </summary>
     private async Task ApplyDispatchStaggerDelayAsync(
@@ -390,6 +401,13 @@ internal sealed class Matchmaker
         List<string> availableDevices,
         CancellationToken cancellationToken)
     {
+        // Skip delay for the first command ever
+        if (_lastDispatchTime == DateTimeOffset.MinValue)
+        {
+            return;
+        }
+
+        // Always delay 2s for subsequent commands
         try
         {
             await Task.Delay(_dispatchStaggerDelay, cancellationToken)

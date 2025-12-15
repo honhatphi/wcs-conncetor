@@ -459,16 +459,11 @@ public sealed class AutomationGateway : IAsyncDisposable
                 };
             }
 
-            // Get current queue state for validation
-            var pendingCommands = _orchestrator.GetPendingCommands();
-            var processingCommands = _orchestrator.GetProcessingCommands();
-            var allActiveCommands = pendingCommands.Concat(processingCommands).ToList();
-
-            // Step 1: Validate ALL commands first (including queue state rules)
+            // Validate ALL commands first (data correctness only, scheduling rules handled by Matchmaker)
             var rejected = new List<RejectCommand>();
             foreach (var request in requestList)
             {
-                var validationError = ValidateCommandRequest(request, allActiveCommands);
+                var validationError = ValidateCommandRequest(request);
                 if (validationError != null)
                 {
                     _logger.LogWarning($"Command validation failed - TaskId: {request.TaskId}, Reason: {validationError}");
@@ -488,7 +483,7 @@ public sealed class AutomationGateway : IAsyncDisposable
                 };
             }
 
-            // Step 2: All valid - now submit to queue
+            // All valid - submit to queue
             var submitted = 0;
             foreach (var request in requestList)
             {
@@ -922,23 +917,15 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// - If INBOUND exists → Cannot submit OUTBOUND
     /// - If OUTBOUND exists → Cannot submit INBOUND
     /// - TRANSFER can always be submitted
-    /// - CHECKPALLET requires empty queue
+    /// Validates command request parameters.
+    /// Only validates data correctness, scheduling rules are handled by Matchmaker.
     /// </summary>
     /// <param name="request">The command request to validate.</param>
-    /// <param name="activeCommands">Current active commands in queue and processing.</param>
-    private string? ValidateCommandRequest(TransportTask request, List<CommandInfo>? activeCommands = null)
+    private string? ValidateCommandRequest(TransportTask request)
     {
         // Validate CommandType (enum is always valid unless default/undefined)
         if (!Enum.IsDefined(typeof(CommandType), request.CommandType))
             return $"Invalid CommandType: {request.CommandType}";
-
-        // Note: Queue state rules (Inbound/Outbound conflict) are now handled by Matchmaker during scheduling
-        // CheckPallet validation
-        if (activeCommands != null && activeCommands.Count > 0 && request.CommandType == CommandType.CheckPallet)
-        {
-            _logger.LogWarning($"Cannot submit CHECKPALLET command - queue is not empty ({activeCommands.Count} active commands)");
-            return "CHECKPALLET commands can only be submitted when the queue is completely empty";
-        }
 
         // Validate locations based on command type
         switch (request.CommandType)
