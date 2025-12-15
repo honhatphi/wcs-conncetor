@@ -66,6 +66,7 @@ internal abstract class CommandExecutorBase
         {
             CommandId = command.CommandId,
             PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+            SlotId = command.SlotId ?? 0,
             CompletionSignalAddress = Strategy.GetCompletionAddress(SignalMap),
             ResultChannel = resultChannel,
             Steps = steps,

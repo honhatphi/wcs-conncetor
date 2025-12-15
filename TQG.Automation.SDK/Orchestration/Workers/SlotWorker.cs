@@ -9,9 +9,9 @@ using TQG.Automation.SDK.Shared;
 namespace TQG.Automation.SDK.Orchestration.Workers;
 
 /// <summary>
-/// Per-device worker that reads commands from device-specific channel,
-/// executes them via IPlcClient, and writes results to ResultChannel.
-/// Each device has exactly one worker for sequential execution.
+/// Per-slot worker that reads commands from slot-specific channel,
+/// executes them via shared IPlcClient, and writes results to ResultChannel.
+/// Multiple SlotWorkers can share the same IPlcClient for parallel execution.
 ///
 /// Safety Protocol:
 /// Before executing any command, the worker verifies:
@@ -20,13 +20,17 @@ namespace TQG.Automation.SDK.Orchestration.Workers;
 ///
 /// If either check fails, the command is rejected with Error status.
 /// </summary>
-internal sealed class DeviceWorker : IAsyncDisposable
+internal sealed class SlotWorker : IAsyncDisposable
 {
     private readonly string _deviceId;
+    private readonly int _slotId;
+    private readonly string _compositeId;
     private readonly IPlcClient _plcClient;
-    private readonly PlcConnectionOptions _config;
+    private readonly PlcConnectionOptions _deviceConfig;
+    private readonly SlotConfiguration _slotConfig;
+    private readonly SignalMap _signalMap;
     private readonly OrchestratorChannels _channels;
-    private readonly Channel<CommandEnvelope> _deviceChannel;
+    private readonly Channel<CommandEnvelope> _slotChannel;
     private readonly CancellationTokenSource _workerCts;
     private readonly InboundExecutor _inboundExecutor;
     private readonly OutboundExecutor _outboundExecutor;
@@ -35,24 +39,59 @@ internal sealed class DeviceWorker : IAsyncDisposable
     private readonly AsyncManualResetEvent _manualRecoveryTrigger;
     private Task? _workerTask;
 
-    public DeviceWorker(
+    /// <summary>
+    /// Creates a new SlotWorker for a specific slot within a device.
+    /// </summary>
+    /// <param name="plcClient">Shared PLC client (same instance across all slots of this device).</param>
+    /// <param name="deviceConfig">Device-level configuration including FailOnAlarm and SignalMapTemplate.</param>
+    /// <param name="slotConfig">Slot-specific configuration including DbNumber and Capabilities.</param>
+    /// <param name="channels">Orchestrator channels for communication.</param>
+    /// <param name="barcodeValidationCallback">Callback for barcode validation during inbound operations.</param>
+    public SlotWorker(
         IPlcClient plcClient,
-        PlcConnectionOptions config,
+        PlcConnectionOptions deviceConfig,
+        SlotConfiguration slotConfig,
         OrchestratorChannels channels,
         Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
     {
         _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
-        _config = config ?? throw new ArgumentNullException(nameof(config));
+        _deviceConfig = deviceConfig ?? throw new ArgumentNullException(nameof(deviceConfig));
+        _slotConfig = slotConfig ?? throw new ArgumentNullException(nameof(slotConfig));
         _channels = channels ?? throw new ArgumentNullException(nameof(channels));
-        _deviceId = config.DeviceId;
-        _deviceChannel = channels.GetOrCreateDeviceChannel(config.DeviceId);
+
+        _deviceId = deviceConfig.DeviceId;
+        _slotId = slotConfig.SlotId;
+        _compositeId = slotConfig.GetCompositeId(_deviceId);
+
+        // Generate SignalMap from template using slot's DB number
+        _signalMap = deviceConfig.SignalMapTemplate.ToSignalMap(slotConfig.DbNumber);
+
+        // Get or create slot-specific channel
+        _slotChannel = channels.GetOrCreateSlotChannel(_deviceId, _slotId);
         _workerCts = new CancellationTokenSource();
-        _inboundExecutor = new InboundExecutor(plcClient, config.SignalMap, config.FailOnAlarm, barcodeValidationCallback);
-        _outboundExecutor = new OutboundExecutor(plcClient, config.SignalMap, config.FailOnAlarm);
-        _transferExecutor = new TransferExecutor(plcClient, config.SignalMap, config.FailOnAlarm);
-        _checkExecutor = new CheckExecutor(plcClient, config.SignalMap);
+
+        // Create executors with slot-specific SignalMap and device-level FailOnAlarm
+        _inboundExecutor = new InboundExecutor(plcClient, _signalMap, deviceConfig.FailOnAlarm, barcodeValidationCallback);
+        _outboundExecutor = new OutboundExecutor(plcClient, _signalMap, deviceConfig.FailOnAlarm);
+        _transferExecutor = new TransferExecutor(plcClient, _signalMap, deviceConfig.FailOnAlarm);
+        _checkExecutor = new CheckExecutor(plcClient, _signalMap);
         _manualRecoveryTrigger = new AsyncManualResetEvent();
     }
+
+    /// <summary>
+    /// Gets the device identifier.
+    /// </summary>
+    public string DeviceId => _deviceId;
+
+    /// <summary>
+    /// Gets the slot identifier.
+    /// </summary>
+    public int SlotId => _slotId;
+
+    /// <summary>
+    /// Gets the composite identifier (deviceId:SlotN).
+    /// </summary>
+    public string CompositeId => _compositeId;
 
     /// <summary>
     /// Starts the worker background task.
@@ -66,11 +105,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets the operational capabilities of this device.
+    /// Gets the operational capabilities of this slot.
     /// </summary>
     public DeviceCapabilities GetCapabilities()
     {
-        return _config.Capabilities;
+        return _slotConfig.Capabilities;
     }
 
     /// <summary>
@@ -94,7 +133,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Triggers manual recovery for the device.
+    /// Triggers manual recovery for the slot.
     /// This signals the worker to check device status and resume if ready.
     /// Used when AutoRecoveryEnabled is false.
     /// </summary>
@@ -113,10 +152,10 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         try
         {
-            var floorAddress = PlcAddress.Parse(_config.SignalMap.CurrentFloor);
-            var railAddress = PlcAddress.Parse(_config.SignalMap.CurrentRail);
-            var blockAddress = PlcAddress.Parse(_config.SignalMap.CurrentBlock);
-            var depthAddress = PlcAddress.Parse(_config.SignalMap.CurrentDepth);
+            var floorAddress = PlcAddress.Parse(_signalMap.CurrentFloor);
+            var railAddress = PlcAddress.Parse(_signalMap.CurrentRail);
+            var blockAddress = PlcAddress.Parse(_signalMap.CurrentBlock);
+            var depthAddress = PlcAddress.Parse(_signalMap.CurrentDepth);
 
             var floor = await _plcClient.ReadAsync<int>(floorAddress, cancellationToken);
             var rail = await _plcClient.ReadAsync<int>(railAddress, cancellationToken);
@@ -138,7 +177,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Main worker loop: reads commands from device channel, executes, writes results.
+    /// Main worker loop: reads commands from slot channel, executes, writes results.
     /// </summary>
     private async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -158,7 +197,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Processes a single command from the device channel.
+    /// Processes a single command from the slot channel.
     /// </summary>
     private async Task ProcessNextCommandAsync(CancellationToken cancellationToken)
     {
@@ -166,7 +205,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
 
         try
         {
-            command = await _deviceChannel.Reader.ReadAsync(cancellationToken); ;
+            command = await _slotChannel.Reader.ReadAsync(cancellationToken);
 
             var result = await ExecuteCommandAsync(command, cancellationToken);
 
@@ -261,6 +300,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
         {
             CommandId = commandId,
             PlcDeviceId = _deviceId,
+            SlotId = _slotId,
             Status = status,
             Message = message,
             StartedAt = timestamp,
@@ -303,6 +343,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 {
                     CommandId = command.CommandId,
                     PlcDeviceId = _deviceId,
+                    SlotId = _slotId,
                     Status = ExecutionStatus.Failed,
                     Message = "Link not established: PLC program has not set SoftwareConnected flag. Ensure PLC program is running.",
                     StartedAt = startTime,
@@ -319,6 +360,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 {
                     CommandId = command.CommandId,
                     PlcDeviceId = _deviceId,
+                    SlotId = _slotId,
                     Status = ExecutionStatus.Failed,
                     Message = "Device not ready: PLC has not set DeviceReady flag. Device may be busy or in error state.",
                     StartedAt = startTime,
@@ -328,10 +370,10 @@ internal sealed class DeviceWorker : IAsyncDisposable
 
             // Step 3: Create timeout token combining worker cancellation and command timeout
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(_config.CommandTimeout);
+            timeoutCts.CancelAfter(_deviceConfig.CommandTimeout);
 
             // Step 4: Execute via appropriate executor based on command type
-            var executionResult = await ExecuteCommandInternalAsync(command, timeoutCts.Token); ;
+            var executionResult = await ExecuteCommandInternalAsync(command, timeoutCts.Token);
 
             var completedTime = DateTimeOffset.UtcNow;
 
@@ -346,6 +388,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             {
                 CommandId = command.CommandId,
                 PlcDeviceId = _deviceId,
+                SlotId = _slotId,
                 Status = executionResult.Status,
                 Message = detailedMessage,
                 StartedAt = startTime,
@@ -370,8 +413,9 @@ internal sealed class DeviceWorker : IAsyncDisposable
             {
                 CommandId = command.CommandId,
                 PlcDeviceId = _deviceId,
+                SlotId = _slotId,
                 Status = ExecutionStatus.Timeout,
-                Message = $"Command timed out after {_config.CommandTimeout.TotalSeconds}s",
+                Message = $"Command timed out after {_deviceConfig.CommandTimeout.TotalSeconds}s",
                 StartedAt = startTime,
                 CompletedAt = DateTimeOffset.UtcNow
             };
@@ -383,6 +427,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             {
                 CommandId = command.CommandId,
                 PlcDeviceId = _deviceId,
+                SlotId = _slotId,
                 Status = ExecutionStatus.Failed,
                 Message = $"Execution failed: {ex.Message}",
                 StartedAt = startTime,
@@ -413,8 +458,8 @@ internal sealed class DeviceWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Determines if device should signal availability based on command execution result.
-    /// Device should NOT signal availability if:
+    /// Determines if slot should signal availability based on command execution result.
+    /// Slot should NOT signal availability if:
     /// - Status is Alarm (intermediate, command still executing)
     /// - Status is Failed or Timeout (device needs recovery)
     /// </summary>
@@ -438,7 +483,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     /// </summary>
     private async Task WaitForDeviceRecoveryAsync(CancellationToken cancellationToken)
     {
-        if (_config.AutoRecoveryEnabled)
+        if (_deviceConfig.AutoRecoveryEnabled)
         {
             await WaitForAutoRecoveryAsync(cancellationToken);
         }
@@ -455,7 +500,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     /// </summary>
     private async Task<bool> WaitForDeviceReadyAsync(CancellationToken cancellationToken)
     {
-        var maxWaitTime = _config.CommandTimeout; // Use configured command timeout
+        var maxWaitTime = _deviceConfig.CommandTimeout; // Use configured command timeout
         var pollInterval = TimeSpan.FromSeconds(1); // Check every second
         var deadline = DateTimeOffset.UtcNow + maxWaitTime;
 
@@ -517,11 +562,11 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 if (now - lastLogTime > logInterval)
                 {
                     // Note: In production, use proper logging framework
-                    // Console.WriteLine($"[{_deviceId}] Waiting for auto-recovery (DeviceReady=false)...");
+                    // Console.WriteLine($"[{_compositeId}] Waiting for auto-recovery (DeviceReady=false)...");
                     lastLogTime = now;
                 }
 
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
+                await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -530,7 +575,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             catch (Exception)
             {
                 // Error reading device status, continue polling
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
+                await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
             }
         }
     }
@@ -542,7 +587,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     private async Task WaitForManualRecoveryAsync(CancellationToken cancellationToken)
     {
         // Note: In production, use proper logging framework
-        // Console.WriteLine($"[{_deviceId}] Device in error state. Waiting for manual recovery trigger...");
+        // Console.WriteLine($"[{_compositeId}] Slot in error state. Waiting for manual recovery trigger...");
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -557,13 +602,13 @@ internal sealed class DeviceWorker : IAsyncDisposable
 
                 if (isReady)
                 {
-                    // Console.WriteLine($"[{_deviceId}] Manual recovery successful. Device ready.");
+                    // Console.WriteLine($"[{_compositeId}] Manual recovery successful. Slot ready.");
                     await SignalAvailabilityAsync(cancellationToken);
                     return;
                 }
                 else
                 {
-                    // Console.WriteLine($"[{_deviceId}] Manual recovery triggered but device not ready. Continue waiting...");
+                    // Console.WriteLine($"[{_compositeId}] Manual recovery triggered but device not ready. Continue waiting...");
                     // Continue waiting for next trigger
                 }
             }
@@ -574,22 +619,24 @@ internal sealed class DeviceWorker : IAsyncDisposable
             catch (Exception)
             {
                 // Error during recovery check, continue waiting
-                await Task.Delay(_config.RecoveryPollInterval, cancellationToken);
+                await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
             }
         }
     }
 
     /// <summary>
-    /// Signals device availability to AvailabilityChannel.
+    /// Signals slot availability to AvailabilityChannel.
+    /// Includes both DeviceId and SlotId for proper routing.
     /// </summary>
     private async Task SignalAvailabilityAsync(CancellationToken cancellationToken)
     {
         var ticket = new ReadyTicket
         {
             PlcDeviceId = _deviceId,
+            SlotId = _slotId,
             ReadyAt = DateTimeOffset.UtcNow,
             WorkerInstance = GetHashCode(),
-            CurrentQueueDepth = 0 // Device channel has capacity 1, always 0 after read
+            CurrentQueueDepth = 0 // Slot channel has capacity 1, always 0 after read
         };
 
         try

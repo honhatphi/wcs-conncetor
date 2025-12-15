@@ -181,81 +181,58 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// <summary>
     /// Gets the detailed status of a specific device.
     /// Status determination logic:
-    /// - Error: Alarm detected (ErrorAlarm = true)
-    /// - Busy: Device is executing a command
-    /// - Idle: Device is ready and available
+    /// - Error: Alarm detected (ErrorAlarm = true) or device not ready
+    /// - Busy: Device is executing one or more commands (any slot busy)
+    /// - Idle: Device is ready and all slots available
     /// </summary>
     /// <param name="deviceId">Unique device identifier.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Device status enum.</returns>
     /// <exception cref="ArgumentException">Thrown when deviceId is null or empty.</exception>
-    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found, offline, or link is not established.</exception>
-    public Task<DeviceStatus> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
+    /// <exception cref="PlcConnectionFailedException">Thrown when device is not found or offline.</exception>
+    public async Task<DeviceStatus> GetDeviceStatusAsync(string deviceId, CancellationToken cancellationToken = default)
     {
         _logger.LogDebug($"GetDeviceStatusAsync called - DeviceId: {deviceId}");
-        return Task.Run(async () =>
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ArgumentException("Device ID cannot be null or empty.", nameof(deviceId));
+
+        if (!_registry.TryGetManager(deviceId, out var manager))
+            throw new PlcConnectionFailedException($"Device '{deviceId}' not found.");
+
+        if (!manager!.IsConnected)
+            throw new PlcConnectionFailedException($"Device '{deviceId}' is offline.");
+
+        // Check if any slot is busy (has active command)
+        var activeCommands = _orchestrator.GetDeviceActiveCommands(deviceId);
+        if (activeCommands.Count > 0)
         {
-             ObjectDisposedException.ThrowIf(_isDisposed, this);
+            _logger.LogDebug($"Device {deviceId} status: Busy ({activeCommands.Count} active commands)");
+            return DeviceStatus.Busy;
+        }
 
-             if (string.IsNullOrWhiteSpace(deviceId))
-                 throw new ArgumentException("Device ID cannot be null or empty.", nameof(deviceId));
+        // Read ErrorAlarm from PLC (device-level signal, use first slot's SignalMap)
+        try
+        {
+            var signalMap = manager.Options.GetSlotSignalMap(manager.Options.Slots.First().SlotId);
+            var errorAlarmAddress = PlcAddress.Parse(signalMap.ErrorAlarm);
+            var hasAlarm = await manager.Client.ReadAsync<bool>(errorAlarmAddress, cancellationToken).ConfigureAwait(false);
 
-             if (!_registry.TryGetManager(deviceId, out var manager))
-                 throw new PlcConnectionFailedException($"Device '{deviceId}' not found. Please ensure the device is registered.");
+            if (hasAlarm)
+            {
+                _logger.LogWarning($"Device {deviceId} status: Error (Alarm)");
+                return DeviceStatus.Error;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"Failed to read device status for {deviceId}: {ex.Message}");
+            throw new PlcConnectionFailedException($"Device '{deviceId}' is not responding.");
+        }
 
-             var client = manager!.Client;
-             var config = manager.Options;
-
-             var isConnected = manager.IsConnected;
-
-             // If not connected, throw exception
-             if (!isConnected)
-                 throw new PlcConnectionFailedException($"Device '{deviceId}' is offline. Please connect the device using ActivateDevice() before checking status.");
-
-             try
-             {
-                 // Check if link is established
-                 var isLinkEstablished = await client.IsLinkEstablishedAsync(cancellationToken).ConfigureAwait(false);
-
-                 if (!isLinkEstablished)
-                     throw new PlcConnectionFailedException($"Device '{deviceId}' link is not established. Please ensure PLC program is running and has initialized the link.");
-
-                 // Check for error alarm
-                 var errorAlarmAddress = PlcAddress.Parse(config.SignalMap.ErrorAlarm);
-                 var hasAlarm = await client.ReadAsync<bool>(errorAlarmAddress, cancellationToken).ConfigureAwait(false);
-
-                 if (hasAlarm)
-                 {
-                     _logger.LogWarning($"Device {deviceId} status: Error (ErrorAlarm = true)");
-                     return DeviceStatus.Error;
-                 }
-
-                 // Check if device is executing a command
-                 var currentCommandId = _orchestrator.GetDeviceActiveCommand(deviceId)?.CommandId;
-                 if (!string.IsNullOrEmpty(currentCommandId))
-                 {
-                     _logger.LogDebug($"Device {deviceId} status: Busy (CommandId: {currentCommandId})");
-                     return DeviceStatus.Busy;
-                 }
-
-                 // Check if device is ready
-                 var isReady = await client.IsDeviceReadyAsync(cancellationToken).ConfigureAwait(false);
-
-                 var status = isReady ? DeviceStatus.Idle : DeviceStatus.Error;
-                 _logger.LogDebug($"Device {deviceId} status: {status}");
-                 return status;
-             }
-             catch (PlcConnectionFailedException)
-             {
-                 throw; // Re-throw connection exceptions
-             }
-             catch
-             {
-                 // If any PLC read fails, throw offline exception
-                 throw new PlcConnectionFailedException($"Device '{deviceId}' is not responding. Please check the connection and try again.");
-             }
-         });
-
+        _logger.LogDebug($"Device {deviceId} status: Idle");
+        return DeviceStatus.Idle;
     }
 
     /// <summary>
@@ -694,15 +671,16 @@ public sealed class AutomationGateway : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets the currently executing command for a specific device.
-    /// Returns null if device is idle or not found.
+    /// Gets all currently executing commands for a specific device (one per slot).
+    /// Returns empty array if device is idle or not found.
+    /// With multi-slot architecture, a device can execute multiple commands simultaneously.
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
-    /// <returns>Command tracking information of the active command, or null if device is idle.</returns>
-    public string? GetCurrentTask(string deviceId)
+    /// <returns>Array of task IDs for all active commands on this device.</returns>
+    public string[] GetCurrentTasks(string deviceId)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
-        return _orchestrator.GetDeviceActiveCommand(deviceId)?.CommandId;
+        return [.. _orchestrator.GetDeviceActiveCommands(deviceId).Select(c => c.CommandId)];
     }
 
     /// <summary>
@@ -759,11 +737,13 @@ public sealed class AutomationGateway : IAsyncDisposable
                 {
                     var eventArgsAlarm = new TaskAlarmEventArgs(
                         notification.PlcDeviceId,
+                        notification.SlotId,
                         notification.CommandId,
                         notification.PlcError);
 
                     _logger.LogWarning($"EVENT: TaskAlarm raised - TaskId: {notification.CommandId}," +
                         $" DeviceId: {notification.PlcDeviceId}," +
+                        $" SlotId: {notification.SlotId}," +
                         $" ErrorCode: {notification.PlcError.ErrorCode}," +
                         $" ErrorMessage: {notification.PlcError.ErrorMessage}," +
                         $" Steps: {notification.Data}");
@@ -776,16 +756,17 @@ public sealed class AutomationGateway : IAsyncDisposable
             // Final result events
             if (notification.Status == CommandStatus.Success)
             {
-                var eventArgsSuccess = new TaskSucceededEventArgs(notification.PlcDeviceId, notification.CommandId);
-                _logger.LogInformation($"EVENT: TaskSucceeded raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}");
+                var eventArgsSuccess = new TaskSucceededEventArgs(notification.PlcDeviceId, notification.SlotId, notification.CommandId);
+                _logger.LogInformation($"EVENT: TaskSucceeded raised - TaskId: {notification.CommandId}, DeviceId: {notification.PlcDeviceId}, SlotId: {notification.SlotId}");
                 TaskSucceeded?.Invoke(this, eventArgsSuccess);
             }
             else if (notification.Status == CommandStatus.Failed)
             {
                 var error = notification.PlcError ?? new ErrorDetail(-1, notification.Message ?? "Exception");
-                var eventArgsFailed = new TaskFailedEventArgs(notification.PlcDeviceId, notification.CommandId, error);
+                var eventArgsFailed = new TaskFailedEventArgs(notification.PlcDeviceId, notification.SlotId, notification.CommandId, error);
                 _logger.LogError($"EVENT: TaskFailed raised - TaskId: {notification.CommandId}," +
                     $" DeviceId: {notification.PlcDeviceId}," +
+                    $" SlotId: {notification.SlotId}," +
                     $" ErrorCode: {error.ErrorCode}," +
                     $" ErrorMessage: {error.ErrorMessage}," +
                     $" Steps: {notification.Data}");
@@ -890,6 +871,7 @@ public sealed class AutomationGateway : IAsyncDisposable
         {
             CommandId = result.CommandId,
             PlcDeviceId = result.PlcDeviceId,
+            SlotId = result.SlotId ?? 0,
             Status = publicStatus,
             Message = result.Message,
             CompletedAt = result.CompletedAt,
@@ -1036,19 +1018,31 @@ public sealed class AutomationGateway : IAsyncDisposable
     }
 
     /// <summary>
-    /// Initializes a single device: creates client, manager, and registers (but does NOT connect).
+    /// Initializes a single device with multi-slot support: creates client, manager, and registers (but does NOT connect).
+    /// Each device can have multiple slots (e.g., Slot 1 for Inbound, Slot 2 for Outbound) sharing single TCP connection.
     /// Use StartDeviceAsync() to establish physical connection.
     /// </summary>
     private void InitializeDevice(PlcConnectionOptions config)
     {
         config.Validate();
 
+        // Validate slots configuration
+        if (config.Slots == null || config.Slots.Count == 0)
+            throw new ArgumentException($"Device '{config.DeviceId}' must have at least one slot configured.", nameof(config));
+
+        // Validate SignalMapTemplate is required for multi-slot
+        if (config.SignalMapTemplate == null)
+            throw new ArgumentException($"Device '{config.DeviceId}' must have SignalMapTemplate configured.", nameof(config));
+
         var client = PlcClientFactory.Create(config);
         var manager = new PlcConnectionManager(client, config);
 
         // Register to registry and orchestrator (no connection yet)
+        // Orchestrator will create SlotWorkers for each slot internally
         _registry.RegisterAsync(config.DeviceId, manager);
         _orchestrator.RegisterDevice(client, config);
+
+        _logger.LogInformation($"Device '{config.DeviceId}' initialized with {config.Slots.Count} slot(s): [{string.Join(", ", config.Slots.Select(s => $"Slot{s.SlotId}(DB{s.DbNumber})"))}]");
     }
 
     /// <summary>

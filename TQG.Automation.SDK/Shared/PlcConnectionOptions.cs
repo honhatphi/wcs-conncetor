@@ -4,7 +4,9 @@ using TQG.Automation.SDK.Core;
 namespace TQG.Automation.SDK.Shared;
 
 /// <summary>
-/// Immutable configuration for a PLC connection.
+/// Immutable configuration for a PLC connection with multi-slot support.
+/// Each device can have multiple slots sharing the same physical connection,
+/// enabling parallel command execution (e.g., 2 inbound + 2 outbound simultaneously).
 /// </summary>
 public sealed record PlcConnectionOptions
 {
@@ -24,7 +26,8 @@ public sealed record PlcConnectionOptions
     public int Rack { get; init; } = 0;
 
     /// <summary>
-    /// Gets the slot number (typically 1 for CPU).
+    /// Gets the PLC CPU slot number (typically 1 for CPU).
+    /// Note: This is the physical PLC slot, not to be confused with <see cref="SlotConfiguration"/>.
     /// </summary>
     public int Slot { get; init; } = 1;
 
@@ -64,13 +67,22 @@ public sealed record PlcConnectionOptions
     public TimeSpan ReconnectBaseDelay { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    /// Gets the signal address mapping for PLC registers.
-    /// Contains all register addresses for commands, status, and feedback.
+    /// Gets the signal address template for PLC registers.
+    /// Addresses are defined without DB prefix; each slot's <see cref="SlotConfiguration.DbNumber"/>
+    /// is used to generate the full address at runtime.
     /// </summary>
-    public required SignalMap SignalMap { get; init; }
+    public required SignalMapTemplate SignalMapTemplate { get; init; }
+
+    /// <summary>
+    /// Gets the slot configurations for this device.
+    /// Each slot represents a logical channel with its own DB number and capabilities.
+    /// Multiple slots share the same physical PLC connection.
+    /// </summary>
+    public required List<SlotConfiguration> Slots { get; init; }
 
     /// <summary>
     /// Gets the alarm handling behavior during command execution.
+    /// Applies to all slots of this device.
     /// When true, command fails immediately when ErrorAlarm is detected.
     /// When false, command continues until CommandFailed or Completed despite alarm.
     /// </summary>
@@ -98,11 +110,35 @@ public sealed record PlcConnectionOptions
     public TimeSpan RecoveryPollInterval { get; init; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Gets the operational capabilities of the device.
-    /// Defines which command types (Inbound, Outbound, Transfer, CheckPallet) this device supports.
-    /// Default is all capabilities enabled.
+    /// Gets the number of configured slots.
     /// </summary>
-    public DeviceCapabilities Capabilities { get; init; } = DeviceCapabilities.Default;
+    public int SlotCount => Slots?.Count ?? 0;
+
+    /// <summary>
+    /// Generates a <see cref="SignalMap"/> for the specified slot.
+    /// </summary>
+    /// <param name="slotId">The slot identifier (1, 2, 3...).</param>
+    /// <returns>A fully-qualified <see cref="SignalMap"/> for the slot.</returns>
+    /// <exception cref="ArgumentException">Thrown when slot is not found.</exception>
+    public SignalMap GetSlotSignalMap(int slotId)
+    {
+        var slot = Slots?.FirstOrDefault(s => s.SlotId == slotId)
+            ?? throw new ArgumentException($"Slot {slotId} not found in device '{DeviceId}'.", nameof(slotId));
+
+        return SignalMapTemplate.ToSignalMap(slot.DbNumber);
+    }
+
+    /// <summary>
+    /// Gets the configuration for a specific slot.
+    /// </summary>
+    /// <param name="slotId">The slot identifier (1, 2, 3...).</param>
+    /// <returns>The slot configuration.</returns>
+    /// <exception cref="ArgumentException">Thrown when slot is not found.</exception>
+    public SlotConfiguration GetSlot(int slotId)
+    {
+        return Slots?.FirstOrDefault(s => s.SlotId == slotId)
+            ?? throw new ArgumentException($"Slot {slotId} not found in device '{DeviceId}'.", nameof(slotId));
+    }
 
     /// <summary>
     /// Validates the configuration and throws if invalid.
@@ -149,16 +185,29 @@ public sealed record PlcConnectionOptions
         if (RecoveryPollInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(RecoveryPollInterval), RecoveryPollInterval, "RecoveryPollInterval must be positive.");
 
-        // Validate signal map
-        if (SignalMap == null)
-            throw new ArgumentNullException(nameof(SignalMap), "SignalMap cannot be null.");
+        // Validate signal map template
+        if (SignalMapTemplate == null)
+            throw new ArgumentNullException(nameof(SignalMapTemplate), "SignalMapTemplate cannot be null.");
 
-        SignalMap.Validate();
+        SignalMapTemplate.Validate();
 
-        // Validate capabilities
-        if (Capabilities == null)
-            throw new ArgumentNullException(nameof(Capabilities), "Capabilities cannot be null.");
+        // Validate slots
+        if (Slots == null || Slots.Count == 0)
+            throw new ArgumentException("At least one slot must be configured.", nameof(Slots));
 
-        Capabilities.Validate();
+        // Validate each slot and check for duplicates
+        var slotIds = new HashSet<int>();
+        var dbNumbers = new HashSet<int>();
+
+        foreach (var slot in Slots)
+        {
+            slot.Validate();
+
+            if (!slotIds.Add(slot.SlotId))
+                throw new ArgumentException($"Duplicate SlotId found: {slot.SlotId}. SlotIds must be unique within a device.", nameof(Slots));
+
+            if (!dbNumbers.Add(slot.DbNumber))
+                throw new ArgumentException($"Duplicate DbNumber found: {slot.DbNumber}. Each slot must have a unique DB number.", nameof(Slots));
+        }
     }
 }

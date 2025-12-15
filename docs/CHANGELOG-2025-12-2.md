@@ -40,6 +40,18 @@
 - **Chuyển** là lệnh đơn, không chạy cùng với lệnh khác.
 - **Nhập/Xuất** không được chạy đồng thời nhưng có thể chạy song song cùng loại (2 lệnh Nhập hoặc 2 lệnh Xuất)
 
+### AutomationGateway
+
+5. **Điều chỉnh phương thức lấy task đang thực thi**
+   - Cũ: `string? GetCurrentTask(string deviceId)` - Trả về 1 TaskId hoặc null
+   - Mới: `string[] GetCurrentTasks(string deviceId)` - Trả về mảng TaskId của tất cả lệnh đang thực thi
+
+6. **Thêm `SlotId` vào các Event Args**
+   - `TaskSucceededEventArgs`: Thêm `SlotId` để phân biệt slot thực thi
+   - `TaskFailedEventArgs`: Thêm `SlotId` để phân biệt slot thực thi
+   - `TaskAlarmEventArgs`: Thêm `SlotId` để phân biệt slot xảy ra alarm
+   - Giá trị tham chiếu từ `SlotConfiguration.SlotId`
+
 ---
 
 > **Note:** Không có thay đổi cách sử dụng hàm hiện tại.

@@ -18,6 +18,11 @@ internal sealed class SignalMonitorContext
     public required string PlcDeviceId { get; init; }
 
     /// <summary>
+    /// The slot identifier where command is being executed.
+    /// </summary>
+    public required int SlotId { get; init; }
+
+    /// <summary>
     /// The PLC address to monitor for command completion signal.
     /// </summary>
     public required string CompletionSignalAddress { get; init; }

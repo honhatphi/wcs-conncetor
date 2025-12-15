@@ -44,6 +44,7 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
         {
             CommandId = command.CommandId,
             PlcDeviceId = command.PlcDeviceId ?? "Unknown",
+            SlotId = command.SlotId ?? 0,
             CompletionSignalAddress = _strategy.GetCompletionAddress(_signalMap),
             ResultChannel = resultChannel,
             Steps = steps,

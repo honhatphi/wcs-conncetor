@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using TQG.Automation.SDK.Exceptions;
+using TQG.Automation.SDK.Orchestration.Workers;
 using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Management;
@@ -7,6 +8,7 @@ namespace TQG.Automation.SDK.Management;
 /// <summary>
 /// Thread-safe registry for managing multiple PLC connections.
 /// Uses ConcurrentDictionary for lock-free concurrent operations.
+/// Each device can have multiple slots sharing a single connection.
 /// </summary>
 internal sealed class PlcRegistry : IAsyncDisposable
 {
@@ -30,6 +32,61 @@ internal sealed class PlcRegistry : IAsyncDisposable
     /// Gets all registered device IDs.
     /// </summary>
     public IEnumerable<string> DeviceIds => _managers.Keys;
+
+    /// <summary>
+    /// Gets all device-slot combinations registered in the registry.
+    /// </summary>
+    /// <returns>Enumerable of (DeviceId, SlotId) tuples.</returns>
+    public IEnumerable<(string DeviceId, int SlotId)> GetAllSlots()
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        foreach (var (deviceId, manager) in _managers)
+        {
+            foreach (var slotId in manager.SlotWorkers.Keys)
+            {
+                yield return (deviceId, slotId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets all slot workers across all devices.
+    /// </summary>
+    /// <returns>Enumerable of (DeviceId, SlotId, SlotWorker) tuples.</returns>
+    public IEnumerable<(string DeviceId, int SlotId, SlotWorker Worker)> GetAllSlotWorkers()
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        foreach (var (deviceId, manager) in _managers)
+        {
+            foreach (var (slotId, worker) in manager.SlotWorkers)
+            {
+                yield return (deviceId, slotId, worker);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets a specific slot worker by device ID and slot ID.
+    /// </summary>
+    /// <param name="deviceId">Device identifier.</param>
+    /// <param name="slotId">Slot identifier.</param>
+    /// <returns>The SlotWorker if found; otherwise null.</returns>
+    public SlotWorker? GetSlotWorker(string deviceId, int slotId)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return null;
+
+        if (_managers.TryGetValue(deviceId, out var manager))
+        {
+            return manager.GetSlotWorker(slotId);
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Registers a new PLC connection manager.

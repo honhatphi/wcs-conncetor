@@ -18,6 +18,11 @@ public sealed record CommandResultNotification
     public required string PlcDeviceId { get; init; }
 
     /// <summary>
+    /// Slot ID where the command was executed (references SlotConfiguration.SlotId).
+    /// </summary>
+    public int SlotId { get; init; }
+
+    /// <summary>
     /// Execution status.
     /// </summary>
     public required CommandStatus Status { get; init; }

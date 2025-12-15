@@ -312,8 +312,10 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
 
         try
         {
+            // Use first slot's SignalMap for device-level signals
             // Emulated mode: Auto-set SoftwareConnected flag to simulate PLC program behavior
-            var softwareConnectedAddress = PlcAddress.Parse(_options.SignalMap.SoftwareConnected);
+            var signalMap = _options.GetSlotSignalMap(_options.Slots.First().SlotId);
+            var softwareConnectedAddress = PlcAddress.Parse(signalMap.SoftwareConnected);
             await WriteAsync(softwareConnectedAddress, true, cancellationToken).ConfigureAwait(false);
 
             // Read back to return status
@@ -335,8 +337,10 @@ internal sealed class TcpEmulatedPlcClient : IPlcClient
 
         try
         {
+            // Use first slot's SignalMap for device-level signals
             // Emulated mode: Auto-set DeviceReady flag to simulate PLC program behavior
-            var deviceReadyAddress = PlcAddress.Parse(_options.SignalMap.DeviceReady);
+            var signalMap = _options.GetSlotSignalMap(_options.Slots.First().SlotId);
+            var deviceReadyAddress = PlcAddress.Parse(signalMap.DeviceReady);
             await WriteAsync(deviceReadyAddress, true, cancellationToken).ConfigureAwait(false);
 
             // Read back to return status

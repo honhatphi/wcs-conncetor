@@ -20,6 +20,12 @@ internal sealed record CommandResult
     public required string PlcDeviceId { get; init; }
 
     /// <summary>
+    /// Internal slot identifier where command was executed.
+    /// Not exposed to public API - DeviceId is the public identifier.
+    /// </summary>
+    internal int? SlotId { get; init; }
+
+    /// <summary>
     /// Execution status.
     /// </summary>
     public required ExecutionStatus Status { get; init; }

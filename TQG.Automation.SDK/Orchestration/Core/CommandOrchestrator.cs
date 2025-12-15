@@ -11,7 +11,7 @@ namespace TQG.Automation.SDK.Orchestration.Core;
 
 /// <summary>
 /// Central orchestration coordinator managing command queue, scheduling, and execution.
-/// Owns all channels, pause gate, state tracker, and background workers (Matchmaker, DeviceWorkers, ReplyHub).
+/// Owns all channels, pause gate, state tracker, and background workers (Matchmaker, SlotWorkers, ReplyHub).
 /// Thread-safe: all public methods can be called concurrently.
 /// </summary>
 internal sealed class CommandOrchestrator : IAsyncDisposable
@@ -20,7 +20,12 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     private readonly AsyncManualResetEvent _pauseGate;
     private readonly PendingCommandTracker _tracker;
     private readonly CancellationTokenSource _shutdownCts;
-    private readonly Dictionary<string, DeviceWorker> _deviceWorkers;
+
+    /// <summary>
+    /// Slot workers organized by device and slot.
+    /// Key: deviceId, Value: Dictionary&lt;slotId, SlotWorker&gt;
+    /// </summary>
+    private readonly Dictionary<string, Dictionary<int, SlotWorker>> _slotWorkers;
 
     private Matchmaker? _matchmaker;
     private ReplyHub? _replyHub;
@@ -42,7 +47,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         _pauseGate = new AsyncManualResetEvent(); // Start paused
         _tracker = new PendingCommandTracker();
         _shutdownCts = new CancellationTokenSource();
-        _deviceWorkers = new Dictionary<string, DeviceWorker>(StringComparer.OrdinalIgnoreCase);
+        _slotWorkers = new Dictionary<string, Dictionary<int, SlotWorker>>(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -56,11 +61,13 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Registers a device worker for orchestration.
-    /// Must be called before StartAsync().
+    /// Registers a device with multiple slots for orchestration.
+    /// Creates SlotWorker for each configured slot sharing the same IPlcClient.
+    /// Must be called before Start().
     /// </summary>
     public void RegisterDevice(IPlcClient plcClient, PlcConnectionOptions config)
     {
+        ArgumentNullException.ThrowIfNull(plcClient);
         ArgumentNullException.ThrowIfNull(config);
 
         lock (_lifecycleLock)
@@ -68,19 +75,34 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
             if (_isStarted)
                 throw new InvalidOperationException("Cannot register devices after orchestration has started.");
 
-            if (_deviceWorkers.ContainsKey(config.DeviceId))
+            if (_slotWorkers.ContainsKey(config.DeviceId))
                 throw new ArgumentException($"Device '{config.DeviceId}' is already registered.", nameof(config.DeviceId));
 
             if (_barcodeValidationCallback == null)
                 throw new InvalidOperationException("Barcode validation callback must be set before registering devices. Call SetBarcodeValidationCallback() first.");
 
-            var worker = new DeviceWorker(plcClient, config, _channels, _barcodeValidationCallback);
-            _deviceWorkers[config.DeviceId] = worker;
+            // Create slot workers dictionary for this device
+            var deviceSlots = new Dictionary<int, SlotWorker>();
+
+            foreach (var slotConfig in config.Slots)
+            {
+                var slotWorker = new SlotWorker(
+                    plcClient,                    // Shared client across all slots
+                    config,                       // Device options (FailOnAlarm, timeouts, etc.)
+                    slotConfig,                   // Slot-specific config (DbNumber, Capabilities)
+                    _channels,
+                    _barcodeValidationCallback
+                );
+
+                deviceSlots[slotConfig.SlotId] = slotWorker;
+            }
+
+            _slotWorkers[config.DeviceId] = deviceSlots;
         }
     }
 
     /// <summary>
-    /// Starts background orchestration tasks (Matchmaker, ReplyHub, DeviceWorkers).
+    /// Starts background orchestration tasks (Matchmaker, ReplyHub, SlotWorkers).
     /// Idempotent: safe to call multiple times (subsequent calls are no-op).
     /// </summary>
     public void Start()
@@ -94,23 +116,29 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
             // Create and start Matchmaker
             _matchmaker = new Matchmaker(_channels, _pauseGate, _tracker);
-            
-            // Register device capabilities with Matchmaker
-            foreach (var (deviceId, worker) in _deviceWorkers)
+
+            // Register all slot capabilities with Matchmaker
+            foreach (var (deviceId, slots) in _slotWorkers)
             {
-                _matchmaker.RegisterDeviceCapabilities(deviceId, worker.GetCapabilities());
+                foreach (var (slotId, worker) in slots)
+                {
+                    _matchmaker.RegisterSlotCapabilities(deviceId, slotId, worker.GetCapabilities());
+                }
             }
-            
+
             _matchmakerTask = Task.Run(() => _matchmaker.RunAsync(_shutdownCts.Token), CancellationToken.None);
 
             // Create and start ReplyHub
             _replyHub = new ReplyHub(_channels, _tracker);
             _replyHubTask = Task.Run(() => _replyHub.RunAsync(_shutdownCts.Token), CancellationToken.None);
 
-            // Start all device workers
-            foreach (var worker in _deviceWorkers.Values)
+            // Start all slot workers
+            foreach (var slots in _slotWorkers.Values)
             {
-                worker.Start();
+                foreach (var worker in slots.Values)
+                {
+                    worker.Start();
+                }
             }
 
             // Resume scheduling (open the pause gate)
@@ -136,8 +164,12 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         // Signal shutdown to all background tasks
         _shutdownCts.Cancel();
 
-        // Stop all device workers first
-        var workerStopTasks = _deviceWorkers.Values.Select(w => w.StopAsync()).ToList();
+        // Stop all slot workers first
+        var workerStopTasks = _slotWorkers.Values
+            .SelectMany(slots => slots.Values)
+            .Select(w => w.StopAsync())
+            .ToList();
+
         try
         {
             await Task.WhenAll(workerStopTasks);
@@ -272,7 +304,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
     /// <summary>
     /// Triggers manual recovery for a specific device.
-    /// This signals the device worker to check device status and resume operations if ready.
+    /// This signals all slot workers of the device to check device status and resume operations if ready.
     /// Only effective when the device's AutoRecoveryEnabled is false.
     /// </summary>
     /// <param name="deviceId">The device ID to trigger recovery for.</param>
@@ -286,7 +318,37 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
         lock (_lifecycleLock)
         {
-            if (_deviceWorkers.TryGetValue(deviceId, out var worker))
+            if (_slotWorkers.TryGetValue(deviceId, out var slots))
+            {
+                // Trigger recovery on all slots of this device
+                foreach (var worker in slots.Values)
+                {
+                    worker.TriggerManualRecovery();
+                }
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Triggers manual recovery for a specific slot.
+    /// </summary>
+    /// <param name="deviceId">The device ID.</param>
+    /// <param name="slotId">The slot ID to trigger recovery for.</param>
+    /// <returns>True if slot exists and recovery was triggered; otherwise false.</returns>
+    public bool TriggerSlotRecovery(string deviceId, int slotId)
+    {
+        ThrowIfDisposed();
+
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return false;
+
+        lock (_lifecycleLock)
+        {
+            if (_slotWorkers.TryGetValue(deviceId, out var slots) &&
+                slots.TryGetValue(slotId, out var worker))
             {
                 worker.TriggerManualRecovery();
                 return true;
@@ -315,6 +377,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     /// <summary>
     /// Gets the current location of a device by reading CurrentFloor, CurrentRail, CurrentBlock, CurrentDepth from PLC.
     /// Returns null if device is not found or PLC read fails.
+    /// Uses the first slot worker for location reading (all slots share the same client).
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -326,12 +389,14 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(deviceId))
             return null;
 
-        // Find device worker
-        DeviceWorker? worker;
+        // Find first slot worker for this device
+        SlotWorker? worker;
         lock (_lifecycleLock)
         {
-            if (!_deviceWorkers.TryGetValue(deviceId, out worker))
+            if (!_slotWorkers.TryGetValue(deviceId, out var slots) || slots.Count == 0)
                 return null;
+
+            worker = slots.Values.First();
         }
 
         // Read current location from PLC
@@ -342,6 +407,38 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         catch
         {
             // If read fails, return null
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the current location for a specific slot.
+    /// </summary>
+    /// <param name="deviceId">Device identifier.</param>
+    /// <param name="slotId">Slot identifier.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Current location or null if not found.</returns>
+    public async Task<Location?> GetSlotCurrentLocationAsync(string deviceId, int slotId, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return null;
+
+        SlotWorker? worker;
+        lock (_lifecycleLock)
+        {
+            if (!_slotWorkers.TryGetValue(deviceId, out var slots) ||
+                !slots.TryGetValue(slotId, out worker))
+                return null;
+        }
+
+        try
+        {
+            return await worker.ReadCurrentLocationAsync(cancellationToken);
+        }
+        catch
+        {
             return null;
         }
     }
@@ -370,25 +467,27 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets the currently executing command for a specific device.
-    /// Returns null if device is idle or not found.
+    /// Gets all currently executing commands for a specific device (one per slot).
+    /// Returns empty list if device is idle or not found.
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
-    /// <returns>Command tracking info of the executing command, or null if idle/not found.</returns>
-    public CommandInfo? GetDeviceActiveCommand(string deviceId)
+    /// <returns>List of command tracking info for all executing commands on this device.</returns>
+    public IReadOnlyList<CommandInfo> GetDeviceActiveCommands(string deviceId)
     {
         ThrowIfDisposed();
 
         if (string.IsNullOrWhiteSpace(deviceId))
-            return null;
+            return [];
 
-        // Find processing command for this device
-        var activeCommand = _tracker.GetAllCommands()
-            .FirstOrDefault(info =>
+        // Find all processing commands for this device (could be multiple - one per slot)
+        var activeCommands = _tracker.GetAllCommands()
+            .Where(info =>
                 info.PlcDeviceId?.Equals(deviceId, StringComparison.OrdinalIgnoreCase) == true &&
-                info.State == CommandState.Processing);
+                info.State == CommandState.Processing)
+            .Select(MapToCommandInfo)
+            .ToList();
 
-        return activeCommand == null ? null : MapToCommandInfo(activeCommand);
+        return activeCommands;
     }
 
     /// <summary>
@@ -472,12 +571,16 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         // Stop orchestration (completes channels, waits for workers)
         await StopAsync().ConfigureAwait(false);
 
-        // Dispose all device workers
-        foreach (var worker in _deviceWorkers.Values)
+        // Dispose all slot workers
+        foreach (var slots in _slotWorkers.Values)
         {
-            await worker.DisposeAsync().ConfigureAwait(false);
+            foreach (var worker in slots.Values)
+            {
+                await worker.DisposeAsync().ConfigureAwait(false);
+            }
+            slots.Clear();
         }
-        _deviceWorkers.Clear();
+        _slotWorkers.Clear();
 
         // Dispose shutdown token
         _shutdownCts.Dispose();

@@ -1,11 +1,16 @@
 using TQG.Automation.SDK.Core;
+using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Exceptions;
+using TQG.Automation.SDK.Orchestration.Infrastructure;
+using TQG.Automation.SDK.Orchestration.Workers;
 using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Management;
 
 /// <summary>
-/// Manages the lifecycle of a single PLC connection including health monitoring and automatic reconnection.
+/// Manages the lifecycle of a single PLC connection with multiple slots,
+/// including health monitoring and automatic reconnection.
+/// One IPlcClient is shared across all SlotWorkers for the device.
 /// </summary>
 internal sealed class PlcConnectionManager : IAsyncDisposable
 {
@@ -13,6 +18,7 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
     private readonly PlcConnectionOptions _options;
     private readonly SemaphoreSlim _operationLock;
     private readonly CancellationTokenSource _disposalCts;
+    private readonly Dictionary<int, SlotWorker> _slotWorkers;
 
     private PeriodicTimer? _healthCheckTimer;
     private Task? _healthCheckTask;
@@ -23,8 +29,8 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
     /// <summary>
     /// Initializes a new instance of the PlcConnectionManager class.
     /// </summary>
-    /// <param name="client">The PLC client to manage.</param>
-    /// <param name="options">Connection configuration options.</param>
+    /// <param name="client">The PLC client to manage (shared across all slots).</param>
+    /// <param name="options">Connection configuration options including slot configurations.</param>
     public PlcConnectionManager(IPlcClient client, PlcConnectionOptions options)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -33,10 +39,12 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
 
         _operationLock = new SemaphoreSlim(1, 1);
         _disposalCts = new CancellationTokenSource();
+        _slotWorkers = new Dictionary<int, SlotWorker>();
     }
 
     /// <summary>
     /// Gets the PLC client managed by this manager.
+    /// Shared across all slots of this device.
     /// </summary>
     public IPlcClient Client => _client;
 
@@ -47,11 +55,58 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
 
     /// <summary>
     /// Gets whether the client is currently connected.
+    /// Single connection status for all slots.
     /// </summary>
     public bool IsConnected => _client.IsConnected;
 
     /// <summary>
+    /// Gets the slot workers dictionary.
+    /// Key: SlotId, Value: SlotWorker
+    /// </summary>
+    public IReadOnlyDictionary<int, SlotWorker> SlotWorkers => _slotWorkers;
+
+    /// <summary>
+    /// Gets a specific slot worker by slot ID.
+    /// </summary>
+    /// <param name="slotId">The slot identifier.</param>
+    /// <returns>The SlotWorker if found; otherwise null.</returns>
+    public SlotWorker? GetSlotWorker(int slotId)
+    {
+        return _slotWorkers.GetValueOrDefault(slotId);
+    }
+
+    /// <summary>
+    /// Initializes slot workers for all configured slots.
+    /// Must be called after construction and before connecting.
+    /// </summary>
+    /// <param name="channels">Orchestrator channels for communication.</param>
+    /// <param name="barcodeValidationCallback">Callback for barcode validation during inbound operations.</param>
+    public void InitializeSlotWorkers(
+        OrchestratorChannels channels,
+        Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
+    {
+        ArgumentNullException.ThrowIfNull(channels);
+        ArgumentNullException.ThrowIfNull(barcodeValidationCallback);
+
+        if (_slotWorkers.Count > 0)
+            return; // Already initialized
+
+        foreach (var slotConfig in _options.Slots)
+        {
+            var slotWorker = new SlotWorker(
+                _client,
+                _options,
+                slotConfig,
+                channels,
+                barcodeValidationCallback);
+
+            _slotWorkers[slotConfig.SlotId] = slotWorker;
+        }
+    }
+
+    /// <summary>
     /// Connects to the PLC and starts health monitoring.
+    /// All slots share this single connection.
     /// </summary>
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
@@ -76,7 +131,29 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
     }
 
     /// <summary>
+    /// Starts all slot workers.
+    /// Must be called after ConnectAsync and InitializeSlotWorkers.
+    /// </summary>
+    public void StartSlotWorkers()
+    {
+        foreach (var worker in _slotWorkers.Values)
+        {
+            worker.Start();
+        }
+    }
+
+    /// <summary>
+    /// Stops all slot workers.
+    /// </summary>
+    public async Task StopSlotWorkersAsync()
+    {
+        var stopTasks = _slotWorkers.Values.Select(w => w.StopAsync());
+        await Task.WhenAll(stopTasks).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Disconnects from the PLC and stops health monitoring.
+    /// Stops all slot workers first before disconnecting.
     /// </summary>
     public async Task DisconnectAsync()
     {
@@ -86,7 +163,13 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
         await _operationLock.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Stop all slot workers first
+            await StopSlotWorkersAsync().ConfigureAwait(false);
+
+            // Stop health monitoring
             await StopHealthMonitoringAsync().ConfigureAwait(false);
+
+            // Disconnect single client
             await _client.DisconnectAsync().ConfigureAwait(false);
         }
         finally
@@ -271,6 +354,7 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
 
     /// <summary>
     /// Disposes the connection manager and its resources.
+    /// Disposes all slot workers first.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -282,7 +366,16 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
         try
         {
             _disposalCts.Cancel();
+
+            // Dispose all slot workers
+            var disposeWorkerTasks = _slotWorkers.Values.Select(w => w.DisposeAsync().AsTask());
+            await Task.WhenAll(disposeWorkerTasks).ConfigureAwait(false);
+            _slotWorkers.Clear();
+
+            // Stop health monitoring
             await StopHealthMonitoringAsync().ConfigureAwait(false);
+
+            // Disconnect client
             await _client.DisconnectAsync().ConfigureAwait(false);
         }
         catch

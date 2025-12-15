@@ -53,4 +53,10 @@ internal sealed record CommandEnvelope
     /// Timestamp when command was submitted.
     /// </summary>
     public DateTimeOffset SubmittedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Internal slot identifier assigned by Matchmaker during scheduling.
+    /// Not exposed to public API.
+    /// </summary>
+    internal int? SlotId { get; init; }
 }

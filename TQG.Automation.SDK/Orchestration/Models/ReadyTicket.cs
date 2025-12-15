@@ -12,6 +12,11 @@ internal sealed record ReadyTicket
     public required string PlcDeviceId { get; init; }
 
     /// <summary>
+    /// Slot identifier that is signaling availability.
+    /// </summary>
+    public required int SlotId { get; init; }
+
+    /// <summary>
     /// When device became ready.
     /// </summary>
     public DateTimeOffset ReadyAt { get; init; } = DateTimeOffset.UtcNow;

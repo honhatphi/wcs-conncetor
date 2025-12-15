@@ -287,7 +287,9 @@ internal sealed class S7PlcClient : IPlcClient
 
         try
         {
-            var softwareConnectedAddress = PlcAddress.Parse(_options.SignalMap.SoftwareConnected);
+            // Use first slot's SignalMap for device-level signals
+            var signalMap = _options.GetSlotSignalMap(_options.Slots.First().SlotId);
+            var softwareConnectedAddress = PlcAddress.Parse(signalMap.SoftwareConnected);
             return await ReadAsync<bool>(softwareConnectedAddress, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not PlcException)
@@ -306,7 +308,9 @@ internal sealed class S7PlcClient : IPlcClient
 
         try
         {
-            var deviceReadyAddress = PlcAddress.Parse(_options.SignalMap.DeviceReady);
+            // Use first slot's SignalMap for device-level signals
+            var signalMap = _options.GetSlotSignalMap(_options.Slots.First().SlotId);
+            var deviceReadyAddress = PlcAddress.Parse(signalMap.DeviceReady);
             return await ReadAsync<bool>(deviceReadyAddress, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not PlcException)
