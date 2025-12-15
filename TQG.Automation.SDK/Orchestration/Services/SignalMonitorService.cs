@@ -144,7 +144,7 @@ internal sealed class SignalMonitorService
         {
             CommandId = context.CommandId,
             PlcDeviceId = context.PlcDeviceId,
-            Status = ExecutionStatus.Error,
+            Status = ExecutionStatus.Alarm,
             Message = $"⚠️ Alarm detected during execution: {errorDetail}",
             StartedAt = context.StartTime,
             CompletedAt = DateTimeOffset.UtcNow,

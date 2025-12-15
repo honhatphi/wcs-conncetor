@@ -870,11 +870,9 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// Maps internal CommandResult to public CommandResultNotification.
     /// Mapping logic:
     /// - Success → Success (command completed successfully)
-    /// - Failed → Failed (PLC signaled CommandFailed flag)
-    /// - Warning → Success (command completed with alarm but still successful, message contains warning)
-    /// - Error → Error (alarm detected during execution - intermediate notification)
+    /// - Failed → Failed (PLC signaled CommandFailed flag, cancelled, connection errors)
+    /// - Alarm → Error (alarm detected during execution - intermediate notification)
     /// - Timeout → Failed (command timed out before completion)
-    /// - Cancelled → Failed (command was cancelled)
     /// </summary>
     private static CommandResultNotification MapToNotification(CommandResult result)
     {
@@ -882,11 +880,9 @@ public sealed class AutomationGateway : IAsyncDisposable
         var publicStatus = result.Status switch
         {
             ExecutionStatus.Success => CommandStatus.Success,
-            ExecutionStatus.Warning => CommandStatus.Success, // Warning is still success (completed with alarm)
-            ExecutionStatus.Failed => CommandStatus.Failed,   // PLC signaled failure
-            ExecutionStatus.Error => CommandStatus.Error,     // Alarm notification (intermediate)
+            ExecutionStatus.Alarm => CommandStatus.Error,     // Alarm notification (intermediate)
+            ExecutionStatus.Failed => CommandStatus.Failed,   // Command failed
             ExecutionStatus.Timeout => CommandStatus.Failed,  // Timeout is a failure
-            ExecutionStatus.Cancelled => CommandStatus.Failed, // Cancellation is a failure
             _ => CommandStatus.Failed // Default to Failed for unknown statuses
         };
 

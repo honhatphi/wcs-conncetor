@@ -7,12 +7,20 @@ namespace TQG.Automation.SDK.Orchestration.Infrastructure;
 /// <summary>
 /// Thread-safe tracker for command lifecycle states.
 /// Maintains in-memory state of pending, in-flight, and completed commands.
+/// Also tracks global alarm state to block new command dispatching when any device has an active alarm.
 /// Uses client-provided CommandId (string) as primary key.
 /// </summary>
 internal sealed class PendingCommandTracker
 {
     private readonly ConcurrentDictionary<string, CommandState> _commandStates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CommandTrackingInfo> _commandInfo = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Tracks commands that have active alarms (received Alarm notification but not yet completed).
+    /// Used to block all new command dispatching when any device has an alarm.
+    /// Key: CommandId, Value: ErrorDetail of the alarm.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, ErrorDetail> _activeAlarms = new(StringComparer.Ordinal);
 
     private long _totalSubmitted;
     private long _totalCompleted;
@@ -81,12 +89,57 @@ internal sealed class PendingCommandTracker
             info.PlcError = result.PlcError;
         }
 
+        // Clear alarm when command completes (regardless of status)
+        ClearAlarm(commandId);
+
         Interlocked.Increment(ref _totalCompleted);
 
-        if (result.Status == ExecutionStatus.Error)
+        if (result.Status == ExecutionStatus.Alarm)
         {
             Interlocked.Increment(ref _totalErrors);
         }
+    }
+
+    /// <summary>
+    /// Sets an active alarm for a command.
+    /// Called when Alarm notification is received during command execution.
+    /// Blocks all new command dispatching until alarm is cleared.
+    /// </summary>
+    /// <param name="commandId">Command that has the alarm.</param>
+    /// <param name="error">Error details of the alarm.</param>
+    public void SetAlarm(string commandId, ErrorDetail error)
+    {
+        _activeAlarms[commandId] = error;
+    }
+
+    /// <summary>
+    /// Clears an active alarm for a command.
+    /// Called when command execution completes (success or failure).
+    /// </summary>
+    /// <param name="commandId">Command to clear alarm for.</param>
+    public void ClearAlarm(string commandId)
+    {
+        _activeAlarms.TryRemove(commandId, out _);
+    }
+
+    /// <summary>
+    /// Checks if there are any active alarms in the system.
+    /// Used by Matchmaker to block all new command dispatching when any device has an alarm.
+    /// This prevents sending new commands while a device is in error state and not yet recovered.
+    /// </summary>
+    /// <returns>True if any command has an active alarm, false otherwise.</returns>
+    public bool HasActiveAlarm()
+    {
+        return !_activeAlarms.IsEmpty;
+    }
+
+    /// <summary>
+    /// Gets all active alarms in the system.
+    /// </summary>
+    /// <returns>Dictionary of command IDs to their error details.</returns>
+    public IReadOnlyDictionary<string, ErrorDetail> GetActiveAlarms()
+    {
+        return _activeAlarms.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
     }
 
     /// <summary>
@@ -179,7 +232,7 @@ internal sealed class PendingCommandTracker
             DeviceId = group.Key,
             QueueDepth = group.Count(info => info.State == CommandState.Pending),
             CompletedCount = group.Count(info => info.State == CommandState.Completed),
-            ErrorCount = group.Count(info => info.Status == ExecutionStatus.Error),
+            ErrorCount = group.Count(info => info.Status == ExecutionStatus.Alarm),
             IsAvailable = !group.Any(info => info.State == CommandState.Processing)
         }).ToList();
     }

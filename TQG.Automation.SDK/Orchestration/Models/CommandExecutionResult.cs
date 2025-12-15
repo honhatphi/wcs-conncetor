@@ -29,11 +29,8 @@ internal sealed record CommandExecutionResult
     public static CommandExecutionResult Success(string message, List<string> steps)
         => new() { Status = ExecutionStatus.Success, Message = message, ExecutionSteps = steps };
 
-    public static CommandExecutionResult Warning(string message, List<string> steps)
-        => new() { Status = ExecutionStatus.Warning, Message = message, ExecutionSteps = steps };
-
-    public static CommandExecutionResult Error(string message, List<string> steps, ErrorDetail? plcError = null)
-        => new() { Status = ExecutionStatus.Error, Message = message, ExecutionSteps = steps, PlcError = plcError };
+    public static CommandExecutionResult Alarm(string message, List<string> steps, ErrorDetail? plcError = null)
+        => new() { Status = ExecutionStatus.Alarm, Message = message, ExecutionSteps = steps, PlcError = plcError };
 
     public static CommandExecutionResult Failed(string message, List<string> steps, ErrorDetail? plcError = null)
         => new() { Status = ExecutionStatus.Failed, Message = message, ExecutionSteps = steps, PlcError = plcError };

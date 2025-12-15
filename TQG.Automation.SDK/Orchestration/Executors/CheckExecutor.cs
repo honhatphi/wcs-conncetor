@@ -54,7 +54,7 @@ internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
         catch (Exception ex)
         {
             steps.Add($"Error: {ex.Message}");
-            return CommandExecutionResult.Error(
+            return CommandExecutionResult.Failed(
                 $"CHECK PALLET execution failed: {ex.Message}",
                 steps);
         }

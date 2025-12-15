@@ -2,6 +2,7 @@ namespace TQG.Automation.SDK.Orchestration.Models;
 
 /// <summary>
 /// Internal execution status codes (maps to public CommandStatus).
+/// Simplified to 4 statuses for clearer state management.
 /// </summary>
 internal enum ExecutionStatus
 {
@@ -11,24 +12,16 @@ internal enum ExecutionStatus
     Success,
 
     /// <summary>
-    /// Command completed with warnings.
+    /// Alarm detected during execution (INTERMEDIATE status).
+    /// Command is still executing - not yet completed.
+    /// Used for alarm notifications while command continues.
     /// </summary>
-    Warning,
+    Alarm,
 
     /// <summary>
-    /// Command failed due to error during execution (e.g., connection issue, invalid data).
-    /// </summary>
-    Error,
-
-    /// <summary>
-    /// Command was rejected or failed by PLC (CommandFailed flag set).
+    /// Command failed (includes PLC CommandFailed, cancelled, connection errors).
     /// </summary>
     Failed,
-
-    /// <summary>
-    /// Command was cancelled before completion.
-    /// </summary>
-    Cancelled,
 
     /// <summary>
     /// Command execution timed out.

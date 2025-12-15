@@ -87,7 +87,7 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
         catch (Exception ex)
         {
             steps.Add($"Error: {ex.Message}");
-            return Models.CommandExecutionResult.Error(
+            return Models.CommandExecutionResult.Failed(
                 $"OUTBOUND execution failed: {ex.Message}",
                 steps);
         }
@@ -164,11 +164,8 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
     {
         return signal.Type switch
         {
-            Models.SignalType.CommandCompleted => signal.Error != null
-                ? Models.CommandExecutionResult.Warning(
-                    _strategy.BuildSuccessMessage(command, hasWarning: true), steps)
-                : Models.CommandExecutionResult.Success(
-                    _strategy.BuildSuccessMessage(command, hasWarning: false), steps),
+            Models.SignalType.CommandCompleted => Models.CommandExecutionResult.Success(
+                _strategy.BuildSuccessMessage(command, hasWarning: signal.Error != null), steps),
 
             Models.SignalType.CommandFailed => Models.CommandExecutionResult.Failed(
                 _strategy.BuildFailureMessage(command, signal.Error),
@@ -180,7 +177,7 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
                 steps,
                 signal.Error),
 
-            _ => Models.CommandExecutionResult.Error("Unknown signal detected", steps)
+            _ => Models.CommandExecutionResult.Failed("Unknown signal detected", steps)
         };
     }
 

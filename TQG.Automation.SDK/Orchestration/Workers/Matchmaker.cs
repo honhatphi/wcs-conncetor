@@ -333,6 +333,7 @@ internal sealed class Matchmaker
     /// Checks if a command type can be dispatched based on current processing state.
     /// 
     /// Rules:
+    /// - If any device has active alarm → cannot dispatch ANY command (must wait for alarm resolution)
     /// - If any device is processing Transfer or CheckPallet → cannot dispatch ANY command (must wait)
     /// - If dispatching Transfer or CheckPallet → no other command can be processing (must wait)
     /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
@@ -340,6 +341,14 @@ internal sealed class Matchmaker
     /// </summary>
     private bool CanDispatchCommandType(CommandType commandType)
     {
+        // Rule: If any device has active alarm → block ALL new commands
+        // This handles the scenario where 2 logical devices share 1 physical device:
+        // When Device A has alarm, Device B's physical device is also blocked
+        if (_tracker.HasActiveAlarm())
+        {
+            return false; // Cannot dispatch any command while alarm is active
+        }
+
         // Get all currently processing commands
         var processingCommands = _tracker.GetProcessingCommands().ToList();
         

@@ -109,7 +109,7 @@ internal abstract class CommandExecutorBase
         catch (Exception ex)
         {
             steps.Add($"Error: {ex.Message}");
-            return Models.CommandExecutionResult.Error(
+            return Models.CommandExecutionResult.Failed(
                 $"{Strategy.SupportedCommandType} execution failed: {ex.Message}",
                 steps);
         }
@@ -221,11 +221,8 @@ internal abstract class CommandExecutorBase
 
         return signal.Type switch
         {
-            Models.SignalType.CommandCompleted => signal.Error != null
-                ? Models.CommandExecutionResult.Warning(
-                    Strategy.BuildSuccessMessage(command, hasWarning: true), steps)
-                : Models.CommandExecutionResult.Success(
-                    Strategy.BuildSuccessMessage(command, hasWarning: false), steps),
+            Models.SignalType.CommandCompleted => Models.CommandExecutionResult.Success(
+                Strategy.BuildSuccessMessage(command, hasWarning: signal.Error != null), steps),
 
             Models.SignalType.CommandFailed => Models.CommandExecutionResult.Failed(
                 Strategy.BuildFailureMessage(command, signal.Error),
@@ -237,7 +234,7 @@ internal abstract class CommandExecutorBase
                 steps,
                 signal.Error),
 
-            _ => Models.CommandExecutionResult.Error("Unknown signal detected", steps)
+            _ => Models.CommandExecutionResult.Failed("Unknown signal detected", steps)
         };
     }
 

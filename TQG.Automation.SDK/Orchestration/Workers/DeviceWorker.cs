@@ -224,7 +224,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         var result = CreateErrorResult(
             command.CommandId,
-            ExecutionStatus.Cancelled,
+            ExecutionStatus.Failed,
             "Worker stopped during execution");
 
         await TryPublishResultAsync(result);
@@ -240,7 +240,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
     {
         var result = CreateErrorResult(
             command.CommandId,
-            ExecutionStatus.Error,
+            ExecutionStatus.Failed,
             $"Worker error: {exception.Message}");
 
         await TryPublishResultAsync(result);
@@ -303,7 +303,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 {
                     CommandId = command.CommandId,
                     PlcDeviceId = _deviceId,
-                    Status = ExecutionStatus.Error,
+                    Status = ExecutionStatus.Failed,
                     Message = "Link not established: PLC program has not set SoftwareConnected flag. Ensure PLC program is running.",
                     StartedAt = startTime,
                     CompletedAt = DateTimeOffset.UtcNow
@@ -319,7 +319,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
                 {
                     CommandId = command.CommandId,
                     PlcDeviceId = _deviceId,
-                    Status = ExecutionStatus.Error,
+                    Status = ExecutionStatus.Failed,
                     Message = "Device not ready: PLC has not set DeviceReady flag. Device may be busy or in error state.",
                     StartedAt = startTime,
                     CompletedAt = DateTimeOffset.UtcNow
@@ -383,7 +383,7 @@ internal sealed class DeviceWorker : IAsyncDisposable
             {
                 CommandId = command.CommandId,
                 PlcDeviceId = _deviceId,
-                Status = ExecutionStatus.Error,
+                Status = ExecutionStatus.Failed,
                 Message = $"Execution failed: {ex.Message}",
                 StartedAt = startTime,
                 CompletedAt = DateTimeOffset.UtcNow
@@ -415,19 +415,17 @@ internal sealed class DeviceWorker : IAsyncDisposable
     /// <summary>
     /// Determines if device should signal availability based on command execution result.
     /// Device should NOT signal availability if:
-    /// - Status is Error or Failed (device in error state, needs manual reset)
-    /// - Status is Warning but FailOnAlarm=true (treated as failed)
+    /// - Status is Alarm (intermediate, command still executing)
+    /// - Status is Failed or Timeout (device needs recovery)
     /// </summary>
     private bool ShouldSignalAvailability(CommandResult result)
     {
         return result.Status switch
         {
             ExecutionStatus.Success => true,
-            ExecutionStatus.Warning => !_config.FailOnAlarm, // Warning OK unless FailOnAlarm
-            ExecutionStatus.Error => false,   // Device in error state
-            ExecutionStatus.Failed => false,  // PLC reported failure
-            ExecutionStatus.Timeout => false,  // Timeout is transient, allow retry
-            ExecutionStatus.Cancelled => false, // Cancellation is external, device OK
+            ExecutionStatus.Alarm => false,   // Intermediate - command still executing
+            ExecutionStatus.Failed => false,  // Device needs recovery
+            ExecutionStatus.Timeout => false, // Device needs recovery
             _ => false
         };
     }
