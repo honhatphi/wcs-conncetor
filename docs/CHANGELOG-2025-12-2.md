@@ -16,15 +16,15 @@
    - Đã loại bỏ cơ chế ràng buộc không gửi được lệnh nhập khi xuất và ngược lại khi gửi lệnh.
    - Việc ràng buộc sẽ được DLL tự xử lý khi phân phối lệnh đến thiết bị
 
-5. **Bổ sung cơ chế Device Error State**
+5. **Bổ sung cơ chế lỗi cho thiết bị**
    - Khi bất kỳ slot nào gặp lỗi (Failed/Timeout), toàn bộ device sẽ bị khóa
    - Các slot khác của cùng device không thể nhận lệnh mới cho đến khi recovery hoàn tất
    - Bộ phân bổ lệnh kiểm tra trạng thái device trước khi phân phối
-   - **Ví dụ:** Device có 2 slot (Slot1 và Slot2). Nếu Slot1 gặp lỗi → Slot2 cũng bị khóa ngay lập tức, không nhận lệnh mới cho đến khi Slot1 được recovery thành công
+   - **Ví dụ:** Device có 2 slot (Slot1 và Slot2). Nếu Slot1 gặp lỗi → Slot2 cũng bị khóa ngay lập tức, không nhận lệnh mới cho đến khi Slot1 được khôi phục thành công
 
-6. **Bổ sung logging cho quá trình Recovery**
-   - Thêm log Warning/Info trong `WaitForManualRecoveryAsync` và `WaitForAutoRecoveryAsync`
-   - Giúp người vận hành biết chính xác trạng thái recovery và lý do thất bại
+6. **Bổ sung logging cho quá trình khôi phục**
+   - Thêm log Warning/Info để theo dõi quá trình khôi phục hệ thống
+   - Giúp người vận hành biết chính xác trạng thái khôi phục và lý do thất bại
    - **Khi nào cần xem log:** Sau khi xử lý lỗi và gọi `ResetDeviceStatusAsync()` nhưng không thấy thiết bị tiếp tục thực hiện lệnh mới
 
 7. **Bổ sung logging cho bộ phân bổ lệnh**
@@ -74,10 +74,10 @@
 - `Error` - Chỉ log lỗi
 - `Critical` - Chỉ log lỗi nghiêm trọng
 
-### Quy trình Recovery
+### Quy trình Khôi phục hệ thống
 
 1. Reset thiết bị vật lý: Nhấn nút reset trên HMI/thiết bị để xóa lỗi
-2. Kiểm tra DeviceReady: Đảm bảo đèn Ready sáng trên HMI
+2. Kiểm tra Trạng thái HMI: Đảm bảo đèn Ready sáng trên HMI
 3. Gọi `ResetDeviceStatusAsync()`: Phần mềm kích hoạt recovery
 4. Kiểm tra log: Xác nhận "Manual recovery successful"
 
@@ -108,7 +108,7 @@
 
 8. **Điều chỉnh phương thức lấy task đang thực thi**
    - Cũ: `string? GetCurrentTask(string deviceId)` - Trả về 1 TaskId hoặc null
-   - Mới: `string[] GetCurrentTasks(string deviceId)` - Trả về mảng TaskId của tất cả lệnh đang thực thi
+   - Mới: `string[] GetCurrentTasks(string deviceId)` - Trả về mảng TaskId của tất cả lệnh đang thực thi của thiết bị
 
 9. **Thêm `SlotId` vào các Event Args**
    - `TaskSucceededEventArgs`: Thêm `SlotId` để phân biệt slot thực thi
@@ -117,10 +117,8 @@
    - Giá trị tham chiếu từ `SlotConfiguration.SlotId`
 
 **Lưu ý quan trọng:**
-- Phải reset thiết bị **trước** khi gọi `ResetDeviceStatusAsync()`
-- Nếu recovery thất bại, kiểm tra log để biết nguyên nhân và thử lại
-- Trong khi chờ recovery, tất cả slot của device bị khóa không nhận lệnh mới
+- Phải reset thiết bị ở HMI **trước** khi gọi `ResetDeviceStatusAsync()`
+- Nếu khôi phục thất bại, kiểm tra log để biết nguyên nhân và thử lại
+- Trong khi chờ khôi phục, tất cả slot của device bị khóa không nhận lệnh mới
 
 ---
-
-> **Note:** Không có thay đổi cách sử dụng hàm hiện tại.

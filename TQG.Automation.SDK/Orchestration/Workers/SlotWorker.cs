@@ -549,7 +549,7 @@ internal sealed class SlotWorker : IAsyncDisposable
         {
             try
             {
-                bool isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
+                bool isReady = await IsSlotReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
@@ -594,7 +594,7 @@ internal sealed class SlotWorker : IAsyncDisposable
         {
             try
             {
-                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
+                var isReady = await IsSlotReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
@@ -665,7 +665,7 @@ internal sealed class SlotWorker : IAsyncDisposable
                 _logger.LogInformation($"[{_compositeId}] Manual recovery triggered. Checking device status...");
 
                 // Verify device is actually ready
-                var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
+                var isReady = await IsSlotReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
@@ -737,6 +737,18 @@ internal sealed class SlotWorker : IAsyncDisposable
             // Error reading flags, assume not cleared
             return false;
         }
+    }
+
+    /// <summary>
+    /// Checks if this slot is ready to accept commands by reading DeviceReady flag
+    /// from the slot's own SignalMap (DB).
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>True if DeviceReady flag is set; otherwise false.</returns>
+    private async Task<bool> IsSlotReadyAsync(CancellationToken cancellationToken)
+    {
+        var deviceReadyAddress = PlcAddress.Parse(_signalMap.DeviceReady);
+        return await _plcClient.ReadAsync<bool>(deviceReadyAddress, cancellationToken);
     }
 
     /// <summary>

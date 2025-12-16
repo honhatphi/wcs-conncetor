@@ -49,6 +49,7 @@ internal sealed class InboundStrategy : BaseCommandStrategy
 
     /// <summary>
     /// Executes post-trigger logic: Read barcode, validate, write parameters.
+    /// If barcode is invalid, loop back to read NEW barcode before validating again.
     /// </summary>
     public override async Task<Models.CommandExecutionResult?> ExecutePostTriggerAsync(
         IPlcClient plcClient,
@@ -58,39 +59,55 @@ internal sealed class InboundStrategy : BaseCommandStrategy
         List<string> steps,
         CancellationToken cancellationToken)
     {
-        // Step 1: Read barcode from PLC
-        var barcode = await ReadBarcodeAsync(plcClient, signalMap, command, steps, cancellationToken)
-            .ConfigureAwait(false);
+        var attemptCount = 0;
 
-        // Step 2: Validate barcode with user
-        var validationResponse = await ValidateBarcodeAsync(command, barcode, steps, cancellationToken)
-            .ConfigureAwait(false);
-
-        // Step 3: Write validation result flags to PLC
-        if (!validationResponse.IsValid)
+        while (!cancellationToken.IsCancellationRequested)
         {
-            await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: false, steps, cancellationToken)
+            attemptCount++;
+            if (attemptCount > 1)
+            {
+                steps.Add($"--- Barcode read attempt #{attemptCount} ---");
+            }
+
+            // Step 1: Read barcode from PLC
+            var barcode = await ReadBarcodeAsync(plcClient, signalMap, command, steps, cancellationToken)
                 .ConfigureAwait(false);
-            
-            // Don't return Failed here - let PLC decide the final result
-            // PLC may allow operator to continue via HMI, or it may fail the command
-            // Signal monitor will detect CommandCompleted or CommandFailed
+
+            // Step 2: Validate barcode with user (only called when NEW valid barcode detected)
+            var validationResponse = await ValidateBarcodeAsync(command, barcode, steps, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Step 3: Write validation result flags to PLC
+            if (!validationResponse.IsValid)
+            {
+                await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: false, steps, cancellationToken)
+                    .ConfigureAwait(false);
+                
+                // Wait for barcode to be RESET (cleared to default) before reading new barcode
+                steps.Add("Waiting for barcode reset...");
+                await WaitForBarcodeResetAsync(plcClient, signalMap, steps, cancellationToken)
+                    .ConfigureAwait(false);
+                
+                continue;
+            }
+
+            // Barcode is valid - write valid flag and parameters
+            await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: true, steps, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Step 4: Write command parameters (from validation response)
+            await WriteBarcodeParametersAsync(
+                plcClient, signalMap, validationResponse, steps, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Store for success message building
+            _lastValidationResponse = validationResponse;
+
+            // Continue execution (no early return)
             return null;
         }
 
-        await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: true, steps, cancellationToken)
-            .ConfigureAwait(false);
-
-        // Step 4: Write command parameters (from validation response)
-        await WriteBarcodeParametersAsync(
-            plcClient, signalMap, validationResponse, steps, cancellationToken)
-            .ConfigureAwait(false);
-
-        // Store for success message building
-        _lastValidationResponse = validationResponse;
-
-        // Continue execution (no early return)
-        return null;
+        throw new OperationCanceledException("Barcode validation was cancelled", cancellationToken);
     }
 
     /// <inheritdoc />
@@ -114,6 +131,7 @@ internal sealed class InboundStrategy : BaseCommandStrategy
 
     /// <summary>
     /// Reads barcode from PLC by polling 10 character registers.
+    /// Waits until a valid barcode (not default "0000000000") is detected.
     /// </summary>
     private static async Task<string> ReadBarcodeAsync(
         IPlcClient plcClient,
@@ -168,6 +186,62 @@ internal sealed class InboundStrategy : BaseCommandStrategy
         }
 
         throw new OperationCanceledException("Barcode reading was cancelled", cancellationToken);
+    }
+
+    /// <summary>
+    /// Waits for barcode to be reset to default value "0000000000".
+    /// This is called after barcode validation fails to wait for PLC/operator to clear the barcode.
+    /// </summary>
+    private static async Task WaitForBarcodeResetAsync(
+        IPlcClient plcClient,
+        SignalMap signalMap,
+        List<string> steps,
+        CancellationToken cancellationToken)
+    {
+        var pollInterval = TimeSpan.FromMilliseconds(500);
+        var startTime = DateTimeOffset.UtcNow;
+        var defaultBarcode = "0000000000";
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var barcodeChars = new List<string>(10);
+
+            var addresses = new[]
+            {
+                signalMap.BarcodeChar1, signalMap.BarcodeChar2, signalMap.BarcodeChar3,
+                signalMap.BarcodeChar4, signalMap.BarcodeChar5, signalMap.BarcodeChar6,
+                signalMap.BarcodeChar7, signalMap.BarcodeChar8, signalMap.BarcodeChar9,
+                signalMap.BarcodeChar10
+            };
+
+            for (int i = 0; i < addresses.Length; i++)
+            {
+                var charAddress = PlcAddress.Parse(addresses[i]);
+                var charValue = await plcClient.ReadAsync<string>(charAddress, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (charValue.Length != 1)
+                {
+                    break;
+                }
+
+                barcodeChars.Add(charValue);
+            }
+
+            var barcode = string.Join("", barcodeChars);
+
+            // Barcode is reset when it equals default or is empty
+            if (barcode == defaultBarcode || string.IsNullOrEmpty(barcode))
+            {
+                var elapsed = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
+                steps.Add($"Barcode reset detected after {elapsed:F0}ms");
+                return;
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        throw new OperationCanceledException("Waiting for barcode reset was cancelled", cancellationToken);
     }
 
     /// <summary>

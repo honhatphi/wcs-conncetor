@@ -82,17 +82,6 @@ internal sealed class Matchmaker
     }
 
     /// <summary>
-    /// Registers device capabilities for command matching.
-    /// DEPRECATED: Use RegisterSlotCapabilities for multi-slot architecture.
-    /// Kept for backward compatibility - treats device as having a single slot (slotId=0).
-    /// </summary>
-    [Obsolete("Use RegisterSlotCapabilities for multi-slot architecture")]
-    public void RegisterDeviceCapabilities(string deviceId, DeviceCapabilities capabilities)
-    {
-        RegisterSlotCapabilities(deviceId, 0, capabilities);
-    }
-
-    /// <summary>
     /// Runs the matchmaker loop: reads commands and availability, matches them, schedules to devices.
     /// Auto-pauses when queue becomes empty to save resources.
     /// Runs until cancellation is requested.
@@ -504,17 +493,6 @@ internal sealed class Matchmaker
     }
 
     /// <summary>
-    /// DEPRECATED: Use SlotSupportsCommand.
-    /// Checks if a device supports the specified command type based on its capabilities.
-    /// </summary>
-    [Obsolete("Use SlotSupportsCommand for multi-slot architecture")]
-    private bool DeviceSupportsCommand(string deviceId, CommandType commandType)
-    {
-        // For backward compatibility, check slot 0
-        return SlotSupportsCommand(deviceId, 0, commandType);
-    }
-
-    /// <summary>
     /// Applies stagger delay between consecutive dispatches to avoid overwhelming devices.
     /// First command has no delay, subsequent commands always delay 2s.
     /// Rolls back on cancellation.
@@ -604,16 +582,6 @@ internal sealed class Matchmaker
     }
 
     /// <summary>
-    /// DEPRECATED: Use RequeueSlotAsync.
-    /// Re-queues a device ticket back to availability channel.
-    /// </summary>
-    [Obsolete("Use RequeueSlotAsync for multi-slot architecture")]
-    private async Task RequeueDeviceAsync(string deviceId, CancellationToken cancellationToken)
-    {
-        await RequeueSlotAsync(deviceId, 0, cancellationToken);
-    }
-
-    /// <summary>
     /// Checks if command has device affinity (prefers specific device).
     /// </summary>
     private static bool HasDeviceAffinity(CommandEnvelope command)
@@ -657,20 +625,6 @@ internal sealed class Matchmaker
             _logger?.LogWarning($"[Matchmaker] Slot channel closed for {targetDevice}/Slot{targetSlot}, re-queueing command {command.CommandId}");
             HandleSlotChannelClosed(command, pendingCommands);
         }
-    }
-
-    /// <summary>
-    /// DEPRECATED: Use DispatchCommandToSlotAsync.
-    /// Dispatches command to target device's channel.
-    /// </summary>
-    [Obsolete("Use DispatchCommandToSlotAsync for multi-slot architecture")]
-    private async Task DispatchCommandToDeviceAsync(
-        CommandEnvelope command,
-        string targetDevice,
-        Queue<CommandEnvelope> pendingCommands,
-        CancellationToken cancellationToken)
-    {
-        await DispatchCommandToSlotAsync(command, targetDevice, 0, pendingCommands, cancellationToken);
     }
 
     /// <summary>
@@ -721,25 +675,4 @@ internal readonly struct SlotMatchResult
     }
 
     public static SlotMatchResult NotFound => new(false, string.Empty, -1, -1);
-}
-
-/// <summary>
-/// Result of device matching operation.
-/// DEPRECATED: Use SlotMatchResult for multi-slot architecture.
-/// </summary>
-[Obsolete("Use SlotMatchResult for multi-slot architecture")]
-internal readonly struct DeviceMatchResult
-{
-    public bool Found { get; }
-    public string DeviceId { get; }
-    public int DeviceIndex { get; }
-
-    public DeviceMatchResult(bool found, string deviceId, int deviceIndex)
-    {
-        Found = found;
-        DeviceId = deviceId;
-        DeviceIndex = deviceIndex;
-    }
-
-    public static DeviceMatchResult NotFound => new(false, string.Empty, -1);
 }

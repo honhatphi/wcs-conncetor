@@ -98,41 +98,6 @@ internal sealed class OrchestratorChannels : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets or creates a per-device channel for the specified PLC device ID.
-    /// Each device gets a bounded channel (capacity=1) for sequential command execution.
-    /// Thread-safe: multiple workers can call concurrently during initialization.
-    /// </summary>
-    /// <param name="plcDeviceId">PLC device identifier (e.g., "PLC-01")</param>
-    /// <returns>Bounded channel for device-specific commands</returns>
-    /// <remarks>
-    /// DEPRECATED: Use GetOrCreateSlotChannel for multi-slot architecture.
-    /// Kept for backward compatibility with DeviceWorker during migration.
-    /// </remarks>
-    [Obsolete("Use GetOrCreateSlotChannel for multi-slot architecture")]
-    public Channel<CommandEnvelope> GetOrCreateDeviceChannel(string plcDeviceId)
-    {
-        // For backward compatibility, treat device as slot 0
-        return GetOrCreateSlotChannel(plcDeviceId, 0);
-    }
-
-    /// <summary>
-    /// Attempts to retrieve an existing device channel without creating one.
-    /// </summary>
-    /// <param name="plcDeviceId">PLC device identifier</param>
-    /// <param name="channel">Device channel if found</param>
-    /// <returns>True if channel exists, false otherwise</returns>
-    /// <remarks>
-    /// DEPRECATED: Use TryGetSlotChannel for multi-slot architecture.
-    /// Kept for backward compatibility with DeviceWorker during migration.
-    /// </remarks>
-    [Obsolete("Use TryGetSlotChannel for multi-slot architecture")]
-    public bool TryGetDeviceChannel(string plcDeviceId, out Channel<CommandEnvelope> channel)
-    {
-        // For backward compatibility, treat device as slot 0
-        return TryGetSlotChannel(plcDeviceId, 0, out channel);
-    }
-
-    /// <summary>
     /// Gets all currently registered slot composite IDs (for status queries).
     /// Format: "{deviceId}:Slot{slotId}"
     /// </summary>
