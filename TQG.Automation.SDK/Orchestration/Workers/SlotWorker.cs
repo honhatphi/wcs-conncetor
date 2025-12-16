@@ -425,20 +425,13 @@ internal sealed class SlotWorker : IAsyncDisposable
 
             var completedTime = DateTimeOffset.UtcNow;
 
-            // Build detailed message from execution steps
-            var detailedMessage = executionResult.Message;
-            if (executionResult.ExecutionSteps.Count > 0)
-            {
-                detailedMessage += $"\nSteps: {string.Join(" → ", executionResult.ExecutionSteps)}";
-            }
-
             return new CommandResult
             {
                 CommandId = command.CommandId,
                 PlcDeviceId = _deviceId,
                 SlotId = _slotId,
                 Status = executionResult.Status,
-                Message = detailedMessage,
+                Message = executionResult.Message,
                 StartedAt = startTime,
                 CompletedAt = completedTime,
                 PalletAvailable = executionResult.PalletAvailable,

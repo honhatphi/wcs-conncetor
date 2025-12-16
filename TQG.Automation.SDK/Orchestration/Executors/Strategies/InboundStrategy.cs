@@ -71,7 +71,11 @@ internal sealed class InboundStrategy : BaseCommandStrategy
         {
             await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: false, steps, cancellationToken)
                 .ConfigureAwait(false);
-            return Models.CommandExecutionResult.Failed("Barcode rejected", steps);
+            
+            // Don't return Failed here - let PLC decide the final result
+            // PLC may allow operator to continue via HMI, or it may fail the command
+            // Signal monitor will detect CommandCompleted or CommandFailed
+            return null;
         }
 
         await WriteBarcodeValidationFlagsAsync(plcClient, signalMap, isValid: true, steps, cancellationToken)
