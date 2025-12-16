@@ -22,6 +22,13 @@ internal sealed class PendingCommandTracker
     /// </summary>
     private readonly ConcurrentDictionary<string, ErrorDetail> _activeAlarms = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Tracks devices that are in error state (Failed/Timeout) and need recovery.
+    /// Key: DeviceId, Value: (SlotId, ErrorMessage, ErrorTime).
+    /// All slots of a device are blocked when ANY slot of that device enters error state.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DeviceErrorInfo> _deviceErrors = new(StringComparer.OrdinalIgnoreCase);
+
     private long _totalSubmitted;
     private long _totalCompleted;
     private long _totalErrors;
@@ -140,6 +147,63 @@ internal sealed class PendingCommandTracker
     public IReadOnlyDictionary<string, ErrorDetail> GetActiveAlarms()
     {
         return _activeAlarms.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    /// <summary>
+    /// Sets a device into error state. All slots of this device will be blocked from receiving new commands.
+    /// Called when any slot of a device encounters Failed/Timeout status.
+    /// </summary>
+    /// <param name="deviceId">Device identifier.</param>
+    /// <param name="slotId">Slot that encountered the error.</param>
+    /// <param name="errorMessage">Error description.</param>
+    public void SetDeviceError(string deviceId, int slotId, string errorMessage)
+    {
+        _deviceErrors[deviceId] = new DeviceErrorInfo
+        {
+            DeviceId = deviceId,
+            SlotId = slotId,
+            ErrorMessage = errorMessage,
+            ErrorTime = DateTimeOffset.UtcNow
+        };
+    }
+
+    /// <summary>
+    /// Clears the error state for a device, allowing it to receive new commands.
+    /// Called when device recovery is complete (manual or auto).
+    /// </summary>
+    /// <param name="deviceId">Device identifier.</param>
+    public void ClearDeviceError(string deviceId)
+    {
+        _deviceErrors.TryRemove(deviceId, out _);
+    }
+
+    /// <summary>
+    /// Checks if a specific device is in error state.
+    /// </summary>
+    /// <param name="deviceId">Device identifier.</param>
+    /// <returns>True if device has error, false otherwise.</returns>
+    public bool IsDeviceInError(string deviceId)
+    {
+        return _deviceErrors.ContainsKey(deviceId);
+    }
+
+    /// <summary>
+    /// Checks if ANY device is in error state.
+    /// Used to optionally block all dispatching when any device has errors.
+    /// </summary>
+    /// <returns>True if any device has error, false otherwise.</returns>
+    public bool HasDeviceErrors()
+    {
+        return !_deviceErrors.IsEmpty;
+    }
+
+    /// <summary>
+    /// Gets all devices currently in error state.
+    /// </summary>
+    /// <returns>Dictionary of device IDs to their error information.</returns>
+    public IReadOnlyDictionary<string, DeviceErrorInfo> GetDeviceErrors()
+    {
+        return _deviceErrors.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
     }
 
     /// <summary>
@@ -344,4 +408,30 @@ internal sealed class CommandTrackingInfo
     public bool? PalletAvailable { get; set; }
     public bool? PalletUnavailable { get; set; }
     public ErrorDetail? PlcError { get; set; }
+}
+
+/// <summary>
+/// Information about a device error state.
+/// </summary>
+internal sealed class DeviceErrorInfo
+{
+    /// <summary>
+    /// Device identifier.
+    /// </summary>
+    public required string DeviceId { get; init; }
+
+    /// <summary>
+    /// Slot that encountered the error.
+    /// </summary>
+    public required int SlotId { get; init; }
+
+    /// <summary>
+    /// Error description.
+    /// </summary>
+    public required string ErrorMessage { get; init; }
+
+    /// <summary>
+    /// Time when error occurred.
+    /// </summary>
+    public required DateTimeOffset ErrorTime { get; init; }
 }

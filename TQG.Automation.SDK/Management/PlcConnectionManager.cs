@@ -1,6 +1,7 @@
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Events;
 using TQG.Automation.SDK.Exceptions;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Workers;
 using TQG.Automation.SDK.Shared;
@@ -80,12 +81,18 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
     /// Must be called after construction and before connecting.
     /// </summary>
     /// <param name="channels">Orchestrator channels for communication.</param>
+    /// <param name="tracker">Command tracker for device error state management.</param>
+    /// <param name="logger">Logger for diagnostic messages.</param>
     /// <param name="barcodeValidationCallback">Callback for barcode validation during inbound operations.</param>
     public void InitializeSlotWorkers(
         OrchestratorChannels channels,
+        PendingCommandTracker tracker,
+        ILogger logger,
         Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
     {
         ArgumentNullException.ThrowIfNull(channels);
+        ArgumentNullException.ThrowIfNull(tracker);
+        ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(barcodeValidationCallback);
 
         if (_slotWorkers.Count > 0)
@@ -98,6 +105,8 @@ internal sealed class PlcConnectionManager : IAsyncDisposable
                 _options,
                 slotConfig,
                 channels,
+                tracker,
+                logger,
                 barcodeValidationCallback);
 
             _slotWorkers[slotConfig.SlotId] = slotWorker;

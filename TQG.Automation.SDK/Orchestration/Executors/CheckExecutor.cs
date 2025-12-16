@@ -1,5 +1,6 @@
 using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Shared;
 
@@ -14,6 +15,15 @@ internal sealed class CheckExecutor(IPlcClient plcClient, SignalMap signalMap)
 {
     private readonly IPlcClient _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
     private readonly SignalMap _signalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
+    private ILogger? _logger;
+
+    /// <summary>
+    /// Sets the logger for this executor.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger;
+    }
 
     /// <summary>
     /// Executes a CHECK PALLET command: verify pallet existence at source location.

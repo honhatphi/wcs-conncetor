@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Shared;
 
 namespace TQG.Automation.SDK.Configuration;
@@ -14,6 +15,12 @@ public sealed class PlcGatewayConfiguration
     /// </summary>
     [JsonPropertyName("plcConnections")]
     public List<PlcConnectionOptions> PlcConnections { get; set; } = [];
+
+    /// <summary>
+    /// Gets or sets the logging configuration.
+    /// </summary>
+    [JsonPropertyName("logging")]
+    public LoggingSettings? Logging { get; set; }
 
     /// <summary>
     /// Loads configuration from a JSON file.

@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Events;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Orchestration.Workers;
@@ -36,6 +37,7 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
     private bool _isStarted;
     private bool _isDisposed;
     private Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>>? _barcodeValidationCallback;
+    private ILogger? _logger;
 
     /// <summary>
     /// Initializes the orchestrator with fresh channels and state.
@@ -48,6 +50,15 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
         _tracker = new PendingCommandTracker();
         _shutdownCts = new CancellationTokenSource();
         _slotWorkers = new Dictionary<string, Dictionary<int, SlotWorker>>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Sets the logger for diagnostic messages.
+    /// Must be called before RegisterDevice().
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
     /// <summary>
@@ -81,6 +92,9 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
             if (_barcodeValidationCallback == null)
                 throw new InvalidOperationException("Barcode validation callback must be set before registering devices. Call SetBarcodeValidationCallback() first.");
 
+            if (_logger == null)
+                throw new InvalidOperationException("Logger must be set before registering devices. Call SetLogger() first.");
+
             // Create slot workers dictionary for this device
             var deviceSlots = new Dictionary<int, SlotWorker>();
 
@@ -91,6 +105,8 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
                     config,                       // Device options (FailOnAlarm, timeouts, etc.)
                     slotConfig,                   // Slot-specific config (DbNumber, Capabilities)
                     _channels,
+                    _tracker,                     // Tracker for device error state management
+                    _logger,                      // Logger for diagnostic messages
                     _barcodeValidationCallback
                 );
 
@@ -116,6 +132,10 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
             // Create and start Matchmaker
             _matchmaker = new Matchmaker(_channels, _pauseGate, _tracker);
+            if (_logger != null)
+            {
+                _matchmaker.SetLogger(_logger);
+            }
 
             // Register all slot capabilities with Matchmaker
             foreach (var (deviceId, slots) in _slotWorkers)
@@ -130,6 +150,10 @@ internal sealed class CommandOrchestrator : IAsyncDisposable
 
             // Create and start ReplyHub
             _replyHub = new ReplyHub(_channels, _tracker);
+            if (_logger != null)
+            {
+                _replyHub.SetLogger(_logger);
+            }
             _replyHubTask = Task.Run(() => _replyHub.RunAsync(_shutdownCts.Token), CancellationToken.None);
 
             // Start all slot workers

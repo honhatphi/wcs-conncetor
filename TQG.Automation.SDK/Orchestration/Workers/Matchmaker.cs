@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Shared;
@@ -15,6 +16,7 @@ internal sealed class Matchmaker
     private readonly OrchestratorChannels _channels;
     private readonly AsyncManualResetEvent _pauseGate;
     private readonly PendingCommandTracker _tracker;
+    private ILogger? _logger;
 
     /// <summary>
     /// Slot capabilities organized by device and slot.
@@ -42,6 +44,14 @@ internal sealed class Matchmaker
         _pauseGate = pauseGate ?? throw new ArgumentNullException(nameof(pauseGate));
         _tracker = tracker ?? throw new ArgumentNullException(nameof(tracker));
         _slotCapabilities = new Dictionary<string, Dictionary<int, DeviceCapabilities>>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Sets the logger for this matchmaker.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger;
     }
 
     /// <summary>
@@ -299,10 +309,11 @@ internal sealed class Matchmaker
     /// <summary>
     /// Finds matching slot for a command.
     /// Returns deviceId, slotId, and index if found, otherwise indicates no match.
-    /// Considers slot capabilities and Inbound/Outbound conflict rules.
+    /// Considers slot capabilities, device error state, and Inbound/Outbound conflict rules.
     /// Prefers slots in order (Slot 1 before Slot 2) for predictability.
     /// 
     /// Conflict Rules (apply at DEVICE level, across ALL slots):
+    /// - Cannot dispatch to any device that is in error state (needs recovery first)
     /// - Cannot dispatch Inbound to any slot if another slot is processing Outbound
     /// - Cannot dispatch Outbound to any slot if another slot is processing Inbound
     /// - Transfer commands only go to slots that support Transfer
@@ -314,12 +325,20 @@ internal sealed class Matchmaker
         // Check Inbound/Outbound conflict across all devices
         if (!CanDispatchCommandType(command.CommandType))
         {
+            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: dispatch blocked by conflict rules");
             return SlotMatchResult.NotFound;
         }
 
         if (HasDeviceAffinity(command))
         {
             // Device-specific command: must use specified device
+            // First check if the specified device is in error state
+            if (_tracker.IsDeviceInError(command.PlcDeviceId!))
+            {
+                _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: target device {command.PlcDeviceId} is in error state");
+                return SlotMatchResult.NotFound; // Device in error, cannot dispatch
+            }
+
             // Find slots belonging to the specified device, ordered by SlotId
             var deviceSlots = availableSlots
                 .Select((slot, index) => (slot, index))
@@ -336,14 +355,18 @@ internal sealed class Matchmaker
             }
 
             // No compatible slot available on required device
+            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: device {command.PlcDeviceId} has no available slot supporting {command.CommandType} (checked {deviceSlots.Count} slots)");
             return SlotMatchResult.NotFound;
         }
         else
         {
             // Any-device command: find first available slot that supports this command type
             // Order by DeviceId then SlotId for predictability
+            // Skip devices that are in error state
+            var errorDeviceCount = availableSlots.Count(x => _tracker.IsDeviceInError(x.DeviceId));
             var orderedSlots = availableSlots
                 .Select((slot, index) => (slot, index))
+                .Where(x => !_tracker.IsDeviceInError(x.slot.DeviceId)) // Filter out devices in error
                 .OrderBy(x => x.slot.DeviceId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.slot.SlotId)
                 .ToList();
@@ -357,6 +380,7 @@ internal sealed class Matchmaker
             }
 
             // No compatible slot available
+            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: no available slot supports {command.CommandType} (available={orderedSlots.Count}, skipped due to error={errorDeviceCount})");
             return SlotMatchResult.NotFound;
         }
     }
@@ -366,6 +390,7 @@ internal sealed class Matchmaker
     /// 
     /// Rules:
     /// - If any device has active alarm → cannot dispatch ANY command (must wait for alarm resolution)
+    /// - If any device has error (Failed/Timeout) → cannot dispatch ANY command (must wait for recovery)
     /// - If any device is processing Transfer or CheckPallet → cannot dispatch ANY command (must wait)
     /// - If dispatching Transfer or CheckPallet → no other command can be processing (must wait)
     /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
@@ -378,7 +403,18 @@ internal sealed class Matchmaker
         // When Device A has alarm, Device B's physical device is also blocked
         if (_tracker.HasActiveAlarm())
         {
+            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: active alarm detected");
             return false; // Cannot dispatch any command while alarm is active
+        }
+
+        // Rule: If any device is in error state → block ALL new commands
+        // This ensures no commands are dispatched while any device needs recovery
+        if (_tracker.HasDeviceErrors())
+        {
+            var errorDevices = _tracker.GetDeviceErrors();
+            var errorSummary = string.Join(", ", errorDevices.Select(e => $"{e.Key}:Slot{e.Value.SlotId}"));
+            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: device(s) in error state [{errorSummary}]");
+            return false; // Cannot dispatch any command while any device has error
         }
 
         // Get all currently processing commands
@@ -394,12 +430,15 @@ internal sealed class Matchmaker
         var hasProcessingCheckPallet = processingCommands.Any(c => c.CommandType == CommandType.CheckPallet);
         if (hasProcessingTransfer || hasProcessingCheckPallet)
         {
+            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: Transfer/CheckPallet is processing");
             return false; // Cannot dispatch any command while Transfer/CheckPallet is running
         }
 
         // Rule: If dispatching Transfer or CheckPallet → no other command can be processing
         if (commandType == CommandType.Transfer || commandType == CommandType.CheckPallet)
         {
+            var processingIds = string.Join(", ", processingCommands.Select(c => $"{c.CommandId}:{c.CommandType}"));
+            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: other commands processing [{processingIds}]");
             return false; // Cannot dispatch Transfer/CheckPallet while any command is running
         }
 
@@ -407,12 +446,19 @@ internal sealed class Matchmaker
         var hasProcessingInbound = processingCommands.Any(c => c.CommandType == CommandType.Inbound);
         var hasProcessingOutbound = processingCommands.Any(c => c.CommandType == CommandType.Outbound);
 
-        return commandType switch
+        var canDispatch = commandType switch
         {
             CommandType.Inbound => !hasProcessingOutbound,  // Cannot dispatch Inbound if Outbound is processing
             CommandType.Outbound => !hasProcessingInbound,  // Cannot dispatch Outbound if Inbound is processing
             _ => true
         };
+
+        if (!canDispatch)
+        {
+            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: Inbound/Outbound conflict (Inbound={hasProcessingInbound}, Outbound={hasProcessingOutbound})");
+        }
+
+        return canDispatch;
     }
 
     /// <summary>
@@ -582,9 +628,12 @@ internal sealed class Matchmaker
         {
             await slotChannel.Writer.WriteAsync(command, cancellationToken)
                 .ConfigureAwait(false);
+            
+            _logger?.LogInformation($"[Matchmaker] Dispatched command {command.CommandId} ({command.CommandType}) to {targetDevice}/Slot{targetSlot}");
         }
         catch (ChannelClosedException)
         {
+            _logger?.LogWarning($"[Matchmaker] Slot channel closed for {targetDevice}/Slot{targetSlot}, re-queueing command {command.CommandId}");
             HandleSlotChannelClosed(command, pendingCommands);
         }
     }

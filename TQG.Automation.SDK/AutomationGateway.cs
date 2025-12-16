@@ -23,7 +23,7 @@ public sealed class AutomationGateway : IAsyncDisposable
     private readonly PlcRegistry _registry;
     private readonly CommandOrchestrator _orchestrator;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<BarcodeValidationResponse>> _pendingBarcodeValidations = new();
-    private readonly FileLogger _logger;
+    private FileLogger _logger;
     private CancellationTokenSource? _eventLoopCts;
     private Task? _eventLoopTask;
     private bool _isDisposed;
@@ -130,6 +130,13 @@ public sealed class AutomationGateway : IAsyncDisposable
     {
         _logger.LogInformation("Initialize(string) called - Loading from JSON");
         var config = LoadAndValidateConfiguration(configurations);
+        
+        // Apply logging configuration if specified
+        if (config.Logging != null)
+        {
+            ApplyLoggingConfiguration(config.Logging);
+        }
+        
         InitializeCore(config.PlcConnections);
     }
 
@@ -628,11 +635,11 @@ public sealed class AutomationGateway : IAsyncDisposable
             var result = _orchestrator.TriggerDeviceRecovery(deviceId);
             if (result)
             {
-                _logger.LogInformation($"Device {deviceId} recovery triggered successfully");
+                _logger.LogInformation($"Device {deviceId} recovery triggered. Waiting for device to become ready (check SlotWorker logs for result)...");
             }
             else
             {
-                _logger.LogWarning($"Device {deviceId} recovery trigger failed");
+                _logger.LogWarning($"Device {deviceId} recovery trigger failed - device not found or no slots registered");
             }
             return result;
         });
@@ -982,7 +989,8 @@ public sealed class AutomationGateway : IAsyncDisposable
     /// </summary>
     private void InitializeCore(List<PlcConnectionOptions> configurations)
     {
-        // Set barcode validation callback before registering devices
+        // Set logger and barcode validation callback before registering devices
+        _orchestrator.SetLogger(_logger);
         _orchestrator.SetBarcodeValidationCallback(RequestBarcodeValidationAsync);
 
         var failures = new List<(string DeviceId, Exception Error)>();
@@ -1043,6 +1051,17 @@ public sealed class AutomationGateway : IAsyncDisposable
         _orchestrator.RegisterDevice(client, config);
 
         _logger.LogInformation($"Device '{config.DeviceId}' initialized with {config.Slots.Count} slot(s): [{string.Join(", ", config.Slots.Select(s => $"Slot{s.SlotId}(DB{s.DbNumber})"))}]");
+    }
+
+    /// <summary>
+    /// Applies logging configuration from JSON settings.
+    /// Creates new logger with specified configuration.
+    /// </summary>
+    private void ApplyLoggingConfiguration(LoggingSettings settings)
+    {
+        var loggerConfig = settings.ToLoggerConfiguration();
+        _logger = new FileLogger("AutomationGateway", loggerConfig);
+        _logger.LogInformation($"Logging configuration applied: MinimumLevel={settings.MinimumLevel}, FileOutput={settings.EnableFileOutput}, DebugOutput={settings.EnableDebugOutput}");
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Executors.Strategies;
 using TQG.Automation.SDK.Orchestration.Services;
 using TQG.Automation.SDK.Shared;
@@ -25,6 +26,7 @@ internal abstract class CommandExecutorBase
     protected readonly SignalMap SignalMap;
     protected readonly bool FailOnAlarm;
     protected readonly SignalMonitorService SignalMonitor;
+    protected ILogger? Logger;
 
     protected CommandExecutorBase(
         IPlcClient plcClient,
@@ -35,6 +37,15 @@ internal abstract class CommandExecutorBase
         SignalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
         FailOnAlarm = failOnAlarm;
         SignalMonitor = new SignalMonitorService(plcClient, signalMap);
+    }
+
+    /// <summary>
+    /// Sets the logger for this executor and its signal monitor.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        Logger = logger;
+        SignalMonitor.SetLogger(logger);
     }
 
     /// <summary>

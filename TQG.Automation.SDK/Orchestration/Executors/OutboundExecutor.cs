@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Clients;
 using TQG.Automation.SDK.Core;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Executors.Strategies;
 using TQG.Automation.SDK.Orchestration.Services;
 using TQG.Automation.SDK.Shared;
@@ -19,6 +20,16 @@ internal sealed class OutboundExecutor(IPlcClient plcClient, SignalMap signalMap
     private readonly bool _failOnAlarm = failOnAlarm;
     private readonly OutboundStrategy _strategy = new();
     private readonly SignalMonitorService _signalMonitor = new(plcClient, signalMap);
+    private ILogger? _logger;
+
+    /// <summary>
+    /// Sets the logger for this executor and its signal monitor.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger;
+        _signalMonitor.SetLogger(logger);
+    }
 
     /// <summary>
     /// Executes an OUTBOUND command with continuous signal monitoring.

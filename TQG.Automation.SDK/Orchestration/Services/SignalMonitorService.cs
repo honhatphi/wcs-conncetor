@@ -1,4 +1,5 @@
 using TQG.Automation.SDK.Core;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Models;
 using TQG.Automation.SDK.Shared;
 
@@ -13,6 +14,7 @@ internal sealed class SignalMonitorService
 {
     private readonly IPlcClient _plcClient;
     private readonly SignalMap _signalMap;
+    private ILogger? _logger;
 
     // State for current monitoring session (reset on each MonitorSignalsAsync call)
     private bool _alarmDetected;
@@ -23,6 +25,14 @@ internal sealed class SignalMonitorService
     {
         _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
         _signalMap = signalMap ?? throw new ArgumentNullException(nameof(signalMap));
+    }
+
+    /// <summary>
+    /// Sets the logger for this service.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger;
     }
 
     /// <summary>
@@ -45,6 +55,8 @@ internal sealed class SignalMonitorService
         var commandFailedAddress = PlcAddress.Parse(_signalMap.CommandFailed);
         var completionAddress = PlcAddress.Parse(context.CompletionSignalAddress);
 
+        _logger?.LogDebug($"[SignalMonitor] Started monitoring for {context.CommandId} on {context.PlcDeviceId}/Slot{context.SlotId}");
+
         while (!externalCancellation.IsCancellationRequested)
         {
             try
@@ -61,6 +73,8 @@ internal sealed class SignalMonitorService
                     context.Steps.Add($"⚠️ Alarm detected after {elapsed:F0}ms");
                     context.Steps.Add($"Error Code: {errorDetail.ErrorCode} - {errorDetail.ErrorMessage}");
 
+                    _logger?.LogWarning($"[SignalMonitor] Alarm detected for {context.CommandId}: Code={errorDetail.ErrorCode}, Message={errorDetail.ErrorMessage}, Elapsed={elapsed:F0}ms");
+
                     // Send alarm notification to result channel (only once)
                     await SendAlarmNotificationAsync(context, errorDetail, externalCancellation)
                         .ConfigureAwait(false);
@@ -68,8 +82,13 @@ internal sealed class SignalMonitorService
                     // If failOnAlarm, cancel execution and return immediately
                     if (context.FailOnAlarm)
                     {
+                        _logger?.LogWarning($"[SignalMonitor] FailOnAlarm=true, stopping execution for {context.CommandId}");
                         await signalCts.CancelAsync().ConfigureAwait(false);
                         return SignalMonitorResult.Alarm(errorDetail);
+                    }
+                    else
+                    {
+                        _logger?.LogInformation($"[SignalMonitor] FailOnAlarm=false, continuing execution for {context.CommandId}");
                     }
                 }
 
@@ -81,6 +100,9 @@ internal sealed class SignalMonitorService
                 {
                     var elapsed = (DateTimeOffset.UtcNow - context.StartTime).TotalMilliseconds;
                     context.Steps.Add($"Command failed after {elapsed:F0}ms");
+
+                    var errorInfo = _detectedError != null ? $" (Error: {_detectedError.ErrorCode})" : "";
+                    _logger?.LogWarning($"[SignalMonitor] CommandFailed signal detected for {context.CommandId}{errorInfo}, Elapsed={elapsed:F0}ms");
 
                     await signalCts.CancelAsync().ConfigureAwait(false);
                     return SignalMonitorResult.Failed(_detectedError);
@@ -95,6 +117,9 @@ internal sealed class SignalMonitorService
                     var elapsed = (DateTimeOffset.UtcNow - context.StartTime).TotalMilliseconds;
                     context.Steps.Add($"Command completed after {elapsed:F0}ms");
 
+                    var warningInfo = _detectedError != null ? $" (with warning: {_detectedError.ErrorCode})" : "";
+                    _logger?.LogInformation($"[SignalMonitor] Command {context.CommandId} completed successfully{warningInfo}, Elapsed={elapsed:F0}ms");
+
                     await signalCts.CancelAsync().ConfigureAwait(false);
                     return SignalMonitorResult.Completed(_detectedError);
                 }
@@ -103,10 +128,12 @@ internal sealed class SignalMonitorService
             }
             catch (OperationCanceledException)
             {
+                _logger?.LogDebug($"[SignalMonitor] Monitoring cancelled for {context.CommandId}");
                 break;
             }
         }
 
+        _logger?.LogDebug($"[SignalMonitor] Monitoring ended for {context.CommandId} (external cancellation)");
         return SignalMonitorResult.None();
     }
 

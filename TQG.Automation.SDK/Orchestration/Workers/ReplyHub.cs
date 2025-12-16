@@ -1,3 +1,4 @@
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
 
@@ -19,6 +20,7 @@ internal sealed class ReplyHub
     private readonly PendingCommandTracker _tracker;
     private readonly TimeSpan _cleanupInterval;
     private readonly TimeSpan _commandRetentionPeriod;
+    private ILogger? _logger;
 
     public ReplyHub(
         OrchestratorChannels channels,
@@ -33,12 +35,21 @@ internal sealed class ReplyHub
     }
 
     /// <summary>
+    /// Sets the logger for this ReplyHub.
+    /// </summary>
+    public void SetLogger(ILogger logger)
+    {
+        _logger = logger;
+    }
+
+    /// <summary>
     /// Runs the ReplyHub loop: reads results, updates tracker, broadcasts to observers, and performs periodic cleanup.
     /// Runs until cancellation is requested.
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         var lastCleanupTime = DateTimeOffset.UtcNow;
+        _logger?.LogInformation("[ReplyHub] Started processing results");
 
         try
         {
@@ -50,6 +61,7 @@ internal sealed class ReplyHub
                 {
                     // Set global alarm - blocks all new command dispatching
                     _tracker.SetAlarm(result.CommandId, result.PlcError);
+                    _logger?.LogWarning($"[ReplyHub] Alarm set for {result.CommandId}: {result.PlcError.ErrorMessage} (Code: {result.PlcError.ErrorCode})");
                 }
 
                 // Only mark as completed for FINAL status
@@ -58,6 +70,21 @@ internal sealed class ReplyHub
                 {
                     // MarkAsCompleted also clears any active alarm for this command
                     _tracker.MarkAsCompleted(result.CommandId, result);
+                    
+                    // Log based on status
+                    if (result.Status == ExecutionStatus.Success)
+                    {
+                        _logger?.LogInformation($"[ReplyHub] Command {result.CommandId} completed: {result.Status}");
+                    }
+                    else
+                    {
+                        var errorInfo = result.PlcError != null ? $" - {result.PlcError.ErrorMessage}" : "";
+                        _logger?.LogWarning($"[ReplyHub] Command {result.CommandId} completed: {result.Status}{errorInfo}");
+                    }
+                }
+                else
+                {
+                    _logger?.LogDebug($"[ReplyHub] Received intermediate status for {result.CommandId}: {result.Status}");
                 }
 
                 // Broadcast ALL results to observers (including intermediate Alarm notifications)
@@ -68,6 +95,7 @@ internal sealed class ReplyHub
                 {
                     // BroadcastChannel is unbounded, this should never happen
                     // But handle gracefully just in case
+                    _logger?.LogWarning($"[ReplyHub] BroadcastChannel full, waiting to write result for {result.CommandId}");
                     try
                     {
                         await _channels.BroadcastChannel.Writer.WriteAsync(result, cancellationToken)
@@ -85,6 +113,7 @@ internal sealed class ReplyHub
                 if (now - lastCleanupTime > _cleanupInterval)
                 {
                     _tracker.CleanupOldCommands(_commandRetentionPeriod);
+                    _logger?.LogDebug($"[ReplyHub] Cleanup completed, retention: {_commandRetentionPeriod.TotalMinutes} minutes");
                     lastCleanupTime = now;
                 }
             }
@@ -92,11 +121,14 @@ internal sealed class ReplyHub
         catch (OperationCanceledException)
         {
             // Expected during shutdown
+            _logger?.LogInformation("[ReplyHub] Shutdown requested");
         }
 
         // Final drain: process any remaining results before shutdown
+        var drainCount = 0;
         while (_channels.ResultChannel.Reader.TryRead(out var result))
         {
+            drainCount++;
             // Only mark as completed for FINAL status
             if (IsFinalStatus(result.Status))
             {
@@ -106,6 +138,13 @@ internal sealed class ReplyHub
             // Try to broadcast remaining results
             _channels.BroadcastChannel.Writer.TryWrite(result);
         }
+        
+        if (drainCount > 0)
+        {
+            _logger?.LogInformation($"[ReplyHub] Drained {drainCount} remaining result(s) during shutdown");
+        }
+        
+        _logger?.LogInformation("[ReplyHub] Stopped");
     }
 
     /// <summary>

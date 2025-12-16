@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using TQG.Automation.SDK.Core;
 using TQG.Automation.SDK.Events;
+using TQG.Automation.SDK.Logging;
 using TQG.Automation.SDK.Orchestration.Executors;
 using TQG.Automation.SDK.Orchestration.Infrastructure;
 using TQG.Automation.SDK.Orchestration.Models;
@@ -19,6 +20,12 @@ namespace TQG.Automation.SDK.Orchestration.Workers;
 /// 2. Device ready (DeviceReady flag = true)
 ///
 /// If either check fails, the command is rejected with Error status.
+/// 
+/// Error Recovery Protocol:
+/// When a command fails (Failed/Timeout status), the worker:
+/// 1. Sets device error state via PendingCommandTracker (blocks ALL slots of this device)
+/// 2. Waits for device recovery (auto or manual)
+/// 3. Clears device error state when recovery is complete
 /// </summary>
 internal sealed class SlotWorker : IAsyncDisposable
 {
@@ -30,6 +37,7 @@ internal sealed class SlotWorker : IAsyncDisposable
     private readonly SlotConfiguration _slotConfig;
     private readonly SignalMap _signalMap;
     private readonly OrchestratorChannels _channels;
+    private readonly PendingCommandTracker _tracker;
     private readonly Channel<CommandEnvelope> _slotChannel;
     private readonly CancellationTokenSource _workerCts;
     private readonly InboundExecutor _inboundExecutor;
@@ -37,6 +45,7 @@ internal sealed class SlotWorker : IAsyncDisposable
     private readonly TransferExecutor _transferExecutor;
     private readonly CheckExecutor _checkExecutor;
     private readonly AsyncManualResetEvent _manualRecoveryTrigger;
+    private readonly ILogger _logger;
     private Task? _workerTask;
 
     /// <summary>
@@ -46,18 +55,24 @@ internal sealed class SlotWorker : IAsyncDisposable
     /// <param name="deviceConfig">Device-level configuration including FailOnAlarm and SignalMapTemplate.</param>
     /// <param name="slotConfig">Slot-specific configuration including DbNumber and Capabilities.</param>
     /// <param name="channels">Orchestrator channels for communication.</param>
+    /// <param name="tracker">Command tracker for managing device error state.</param>
+    /// <param name="logger">Logger for diagnostic messages.</param>
     /// <param name="barcodeValidationCallback">Callback for barcode validation during inbound operations.</param>
     public SlotWorker(
         IPlcClient plcClient,
         PlcConnectionOptions deviceConfig,
         SlotConfiguration slotConfig,
         OrchestratorChannels channels,
+        PendingCommandTracker tracker,
+        ILogger logger,
         Func<BarcodeReceivedEventArgs, CancellationToken, Task<BarcodeValidationResponse>> barcodeValidationCallback)
     {
         _plcClient = plcClient ?? throw new ArgumentNullException(nameof(plcClient));
         _deviceConfig = deviceConfig ?? throw new ArgumentNullException(nameof(deviceConfig));
         _slotConfig = slotConfig ?? throw new ArgumentNullException(nameof(slotConfig));
         _channels = channels ?? throw new ArgumentNullException(nameof(channels));
+        _tracker = tracker ?? throw new ArgumentNullException(nameof(tracker));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
         _deviceId = deviceConfig.DeviceId;
         _slotId = slotConfig.SlotId;
@@ -76,6 +91,12 @@ internal sealed class SlotWorker : IAsyncDisposable
         _transferExecutor = new TransferExecutor(plcClient, _signalMap, deviceConfig.FailOnAlarm);
         _checkExecutor = new CheckExecutor(plcClient, _signalMap);
         _manualRecoveryTrigger = new AsyncManualResetEvent();
+
+        // Set logger for all executors
+        _inboundExecutor.SetLogger(logger);
+        _outboundExecutor.SetLogger(logger);
+        _transferExecutor.SetLogger(logger);
+        _checkExecutor.SetLogger(logger);
     }
 
     /// <summary>
@@ -238,6 +259,7 @@ internal sealed class SlotWorker : IAsyncDisposable
 
     /// <summary>
     /// Handles post-execution logic: signal availability or wait for recovery.
+    /// When command fails, sets device error state to block ALL slots of this device.
     /// </summary>
     private async Task HandlePostExecutionAsync(CommandResult result, CancellationToken cancellationToken)
     {
@@ -252,6 +274,10 @@ internal sealed class SlotWorker : IAsyncDisposable
         }
         else
         {
+            // Set device error state to block ALL slots of this device from receiving new commands
+            // This prevents other slots from processing while one slot is in error state
+            _tracker.SetDeviceError(_deviceId, _slotId, result.Message ?? "Unknown error");
+
             await WaitForDeviceRecoveryAsync(cancellationToken);
         }
     }
@@ -277,12 +303,17 @@ internal sealed class SlotWorker : IAsyncDisposable
         Exception exception,
         CancellationToken cancellationToken)
     {
+        _logger.LogError($"[{_compositeId}] Unexpected error during command {command.CommandId} execution: {exception.Message}", exception);
+
         var result = CreateErrorResult(
             command.CommandId,
             ExecutionStatus.Failed,
             $"Worker error: {exception.Message}");
 
         await TryPublishResultAsync(result);
+
+        // Set device error state
+        _tracker.SetDeviceError(_deviceId, _slotId, $"Worker error: {exception.Message}");
 
         if (!cancellationToken.IsCancellationRequested)
         {
@@ -538,10 +569,14 @@ internal sealed class SlotWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Waits for automatic device recovery by continuously polling DeviceReady flag.
+    /// Waits for automatic device recovery by continuously polling DeviceReady flag
+    /// AND verifying that error flags (CommandFailed, ErrorAlarm) have been cleared.
+    /// When recovery is complete, clears device error state to allow new commands.
     /// </summary>
     private async Task WaitForAutoRecoveryAsync(CancellationToken cancellationToken)
     {
+        _logger.LogWarning($"[{_compositeId}] Slot in error state. Auto-recovery enabled, polling for device ready...");
+
         var lastLogTime = DateTimeOffset.MinValue;
         var logInterval = TimeSpan.FromMinutes(1); // Log every minute to avoid spam
 
@@ -553,17 +588,36 @@ internal sealed class SlotWorker : IAsyncDisposable
 
                 if (isReady)
                 {
-                    await SignalAvailabilityAsync(cancellationToken);
-                    return;
-                }
+                    // Additional check: Verify error flags have been cleared
+                    var errorFlagsCleared = await AreErrorFlagsClearedAsync(cancellationToken);
 
-                // Log periodically
-                var now = DateTimeOffset.UtcNow;
-                if (now - lastLogTime > logInterval)
+                    if (errorFlagsCleared)
+                    {
+                        _logger.LogInformation($"[{_compositeId}] Auto-recovery successful. Device ready and error flags cleared.");
+                        // Clear device error state - allow ALL slots to receive new commands
+                        _tracker.ClearDeviceError(_deviceId);
+
+                        await SignalAvailabilityAsync(cancellationToken);
+                        return;
+                    }
+
+                    // DeviceReady=true but error flags not cleared - continue waiting
+                    var now = DateTimeOffset.UtcNow;
+                    if (now - lastLogTime > logInterval)
+                    {
+                        _logger.LogWarning($"[{_compositeId}] DeviceReady=true but error flags (CommandFailed/ErrorAlarm) not cleared. Waiting for device reset...");
+                        lastLogTime = now;
+                    }
+                }
+                else
                 {
-                    // Note: In production, use proper logging framework
-                    // Console.WriteLine($"[{_compositeId}] Waiting for auto-recovery (DeviceReady=false)...");
-                    lastLogTime = now;
+                    // Log periodically
+                    var now = DateTimeOffset.UtcNow;
+                    if (now - lastLogTime > logInterval)
+                    {
+                        _logger.LogDebug($"[{_compositeId}] Waiting for auto-recovery (DeviceReady=false)...");
+                        lastLogTime = now;
+                    }
                 }
 
                 await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
@@ -572,8 +626,9 @@ internal sealed class SlotWorker : IAsyncDisposable
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError($"[{_compositeId}] Error during auto-recovery check: {ex.Message}", ex);
                 // Error reading device status, continue polling
                 await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
             }
@@ -582,12 +637,12 @@ internal sealed class SlotWorker : IAsyncDisposable
 
     /// <summary>
     /// Waits for manual recovery trigger via TriggerManualRecovery().
-    /// Blocks until recovery is triggered, then verifies device is ready.
+    /// Blocks until recovery is triggered, then verifies device is ready and error flags cleared.
+    /// When recovery is complete, clears device error state to allow new commands.
     /// </summary>
     private async Task WaitForManualRecoveryAsync(CancellationToken cancellationToken)
     {
-        // Note: In production, use proper logging framework
-        // Console.WriteLine($"[{_compositeId}] Slot in error state. Waiting for manual recovery trigger...");
+        _logger.LogWarning($"[{_compositeId}] Slot in error state. Waiting for manual recovery trigger. Please reset the device first, then call RecoverDeviceAsync().");
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -597,30 +652,80 @@ internal sealed class SlotWorker : IAsyncDisposable
                 await _manualRecoveryTrigger.WaitAsync(cancellationToken);
                 _manualRecoveryTrigger.Reset(); // Reset for next error
 
+                _logger.LogInformation($"[{_compositeId}] Manual recovery triggered. Checking device status...");
+
                 // Verify device is actually ready
                 var isReady = await _plcClient.IsDeviceReadyAsync(cancellationToken);
 
                 if (isReady)
                 {
-                    // Console.WriteLine($"[{_compositeId}] Manual recovery successful. Slot ready.");
-                    await SignalAvailabilityAsync(cancellationToken);
-                    return;
+                    // Additional check: Verify error flags have been cleared
+                    var errorFlagsCleared = await AreErrorFlagsClearedAsync(cancellationToken);
+
+                    if (errorFlagsCleared)
+                    {
+                        _logger.LogInformation($"[{_compositeId}] Manual recovery successful. Device ready and error flags cleared.");
+                        // Clear device error state - allow ALL slots to receive new commands
+                        _tracker.ClearDeviceError(_deviceId);
+
+                        await SignalAvailabilityAsync(cancellationToken);
+                        return;
+                    }
+
+                    _logger.LogWarning($"[{_compositeId}] Manual recovery FAILED: Device is ready but error flags (CommandFailed/ErrorAlarm) are still set. Please reset the device completely before retrying.");
                 }
                 else
                 {
-                    // Console.WriteLine($"[{_compositeId}] Manual recovery triggered but device not ready. Continue waiting...");
-                    // Continue waiting for next trigger
+                    _logger.LogWarning($"[{_compositeId}] Manual recovery FAILED: DeviceReady flag is false. Please ensure the device has been reset and is operational before retrying.");
                 }
             }
             catch (OperationCanceledException)
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError($"[{_compositeId}] Error during manual recovery check: {ex.Message}", ex);
                 // Error during recovery check, continue waiting
                 await Task.Delay(_deviceConfig.RecoveryPollInterval, cancellationToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Checks if error flags (CommandFailed, ErrorAlarm) have been cleared.
+    /// This ensures the device has been properly reset before accepting new commands.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>True if all error flags are cleared (false), false otherwise.</returns>
+    private async Task<bool> AreErrorFlagsClearedAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Read CommandFailed flag
+            var commandFailedAddress = PlcAddress.Parse(_signalMap.CommandFailed);
+            var commandFailed = await _plcClient.ReadAsync<bool>(commandFailedAddress, cancellationToken);
+
+            if (commandFailed)
+            {
+                return false; // CommandFailed flag still set
+            }
+
+            // Read ErrorAlarm flag
+            var errorAlarmAddress = PlcAddress.Parse(_signalMap.ErrorAlarm);
+            var errorAlarm = await _plcClient.ReadAsync<bool>(errorAlarmAddress, cancellationToken);
+
+            if (errorAlarm)
+            {
+                return false; // ErrorAlarm flag still set
+            }
+
+            return true; // All error flags cleared
+        }
+        catch
+        {
+            // Error reading flags, assume not cleared
+            return false;
         }
     }
 
