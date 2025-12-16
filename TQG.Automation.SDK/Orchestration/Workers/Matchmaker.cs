@@ -35,6 +35,12 @@ internal sealed class Matchmaker
     /// </summary>
     private DateTimeOffset _lastDispatchTime = DateTimeOffset.MinValue;
 
+    /// <summary>
+    /// Tracks last logged block reason to avoid spamming logs in polling loop.
+    /// Only logs when reason changes.
+    /// </summary>
+    private string? _lastLoggedBlockReason;
+
     public Matchmaker(
         OrchestratorChannels channels,
         AsyncManualResetEvent pauseGate,
@@ -323,9 +329,10 @@ internal sealed class Matchmaker
         List<SlotInfo> availableSlots)
     {
         // Check Inbound/Outbound conflict across all devices
-        if (!CanDispatchCommandType(command.CommandType))
+        if (!CanDispatchCommandType(command.CommandType, out var blockReason))
         {
-            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: dispatch blocked by conflict rules");
+            LogBlockReasonOnce($"{command.CommandId}:conflict:{blockReason}",
+                $"[Matchmaker] No slot match for {command.CommandId}: {blockReason}");
             return SlotMatchResult.NotFound;
         }
 
@@ -335,7 +342,8 @@ internal sealed class Matchmaker
             // First check if the specified device is in error state
             if (_tracker.IsDeviceInError(command.PlcDeviceId!))
             {
-                _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: target device {command.PlcDeviceId} is in error state");
+                LogBlockReasonOnce($"{command.CommandId}:device-error:{command.PlcDeviceId}",
+                    $"[Matchmaker] No slot match for {command.CommandId}: target device {command.PlcDeviceId} is in error state");
                 return SlotMatchResult.NotFound; // Device in error, cannot dispatch
             }
 
@@ -350,12 +358,12 @@ internal sealed class Matchmaker
             {
                 if (SlotSupportsCommand(slot.DeviceId, slot.SlotId, command.CommandType))
                 {
+                    ClearBlockReasonLog(); // Found match, clear logged reason
                     return new SlotMatchResult(true, slot.DeviceId, slot.SlotId, index);
                 }
             }
 
-            // No compatible slot available on required device
-            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: device {command.PlcDeviceId} has no available slot supporting {command.CommandType} (checked {deviceSlots.Count} slots)");
+            // No compatible slot available on required device - don't log in loop, just return
             return SlotMatchResult.NotFound;
         }
         else
@@ -363,7 +371,6 @@ internal sealed class Matchmaker
             // Any-device command: find first available slot that supports this command type
             // Order by DeviceId then SlotId for predictability
             // Skip devices that are in error state
-            var errorDeviceCount = availableSlots.Count(x => _tracker.IsDeviceInError(x.DeviceId));
             var orderedSlots = availableSlots
                 .Select((slot, index) => (slot, index))
                 .Where(x => !_tracker.IsDeviceInError(x.slot.DeviceId)) // Filter out devices in error
@@ -375,46 +382,61 @@ internal sealed class Matchmaker
             {
                 if (SlotSupportsCommand(slot.DeviceId, slot.SlotId, command.CommandType))
                 {
+                    ClearBlockReasonLog(); // Found match, clear logged reason
                     return new SlotMatchResult(true, slot.DeviceId, slot.SlotId, index);
                 }
             }
 
-            // No compatible slot available
-            _logger?.LogDebug($"[Matchmaker] No slot match for {command.CommandId}: no available slot supports {command.CommandType} (available={orderedSlots.Count}, skipped due to error={errorDeviceCount})");
+            // No compatible slot available - don't log in loop, just return
             return SlotMatchResult.NotFound;
         }
     }
 
     /// <summary>
+    /// Logs block reason only once when it changes. Prevents log spam in polling loop.
+    /// </summary>
+    private void LogBlockReasonOnce(string reason, string message)
+    {
+        if (_lastLoggedBlockReason != reason)
+        {
+            _lastLoggedBlockReason = reason;
+            _logger?.LogDebug(message);
+        }
+    }
+
+    /// <summary>
+    /// Clears the last logged block reason. Called when dispatch succeeds.
+    /// </summary>
+    private void ClearBlockReasonLog()
+    {
+        _lastLoggedBlockReason = null;
+    }
+
+    /// <summary>
     /// Checks if a command type can be dispatched based on current processing state.
+    /// Returns block reason via out parameter for logging.
     /// 
     /// Rules:
-    /// - If any device has active alarm → cannot dispatch ANY command (must wait for alarm resolution)
-    /// - If any device has error (Failed/Timeout) → cannot dispatch ANY command (must wait for recovery)
+    /// - If any device has error (Alarm/Failed/Timeout) → cannot dispatch ANY command (must wait for recovery)
     /// - If any device is processing Transfer or CheckPallet → cannot dispatch ANY command (must wait)
     /// - If dispatching Transfer or CheckPallet → no other command can be processing (must wait)
     /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
     /// - If any device is processing Outbound → cannot dispatch Inbound (must wait)
     /// </summary>
-    private bool CanDispatchCommandType(CommandType commandType)
+    private bool CanDispatchCommandType(CommandType commandType, out string blockReason)
     {
-        // Rule: If any device has active alarm → block ALL new commands
-        // This handles the scenario where 2 logical devices share 1 physical device:
-        // When Device A has alarm, Device B's physical device is also blocked
-        if (_tracker.HasActiveAlarm())
-        {
-            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: active alarm detected");
-            return false; // Cannot dispatch any command while alarm is active
-        }
+        blockReason = string.Empty;
 
-        // Rule: If any device is in error state → block ALL new commands
-        // This ensures no commands are dispatched while any device needs recovery
+        // Rule: If any device is in error state (Alarm/Failed/Timeout) → block ALL new commands
+        // This handles the scenario where 2 logical devices share 1 physical device:
+        // When Device A has error, Device B's physical device is also blocked
+        // Must wait for recovery before dispatching any command
         if (_tracker.HasDeviceErrors())
         {
             var errorDevices = _tracker.GetDeviceErrors();
             var errorSummary = string.Join(", ", errorDevices.Select(e => $"{e.Key}:Slot{e.Value.SlotId}"));
-            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: device(s) in error state [{errorSummary}]");
-            return false; // Cannot dispatch any command while any device has error
+            blockReason = $"device(s) in error state [{errorSummary}]";
+            return false;
         }
 
         // Get all currently processing commands
@@ -430,16 +452,15 @@ internal sealed class Matchmaker
         var hasProcessingCheckPallet = processingCommands.Any(c => c.CommandType == CommandType.CheckPallet);
         if (hasProcessingTransfer || hasProcessingCheckPallet)
         {
-            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: Transfer/CheckPallet is processing");
-            return false; // Cannot dispatch any command while Transfer/CheckPallet is running
+            blockReason = "Transfer/CheckPallet is processing";
+            return false;
         }
 
         // Rule: If dispatching Transfer or CheckPallet → no other command can be processing
         if (commandType == CommandType.Transfer || commandType == CommandType.CheckPallet)
         {
-            var processingIds = string.Join(", ", processingCommands.Select(c => $"{c.CommandId}:{c.CommandType}"));
-            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: other commands processing [{processingIds}]");
-            return false; // Cannot dispatch Transfer/CheckPallet while any command is running
+            blockReason = "other commands still processing";
+            return false;
         }
 
         // Check for Inbound/Outbound conflict
@@ -455,7 +476,7 @@ internal sealed class Matchmaker
 
         if (!canDispatch)
         {
-            _logger?.LogDebug($"[Matchmaker] Cannot dispatch {commandType}: Inbound/Outbound conflict (Inbound={hasProcessingInbound}, Outbound={hasProcessingOutbound})");
+            blockReason = $"Inbound/Outbound conflict";
         }
 
         return canDispatch;

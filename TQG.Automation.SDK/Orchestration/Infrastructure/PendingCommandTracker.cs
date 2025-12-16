@@ -7,7 +7,7 @@ namespace TQG.Automation.SDK.Orchestration.Infrastructure;
 /// <summary>
 /// Thread-safe tracker for command lifecycle states.
 /// Maintains in-memory state of pending, in-flight, and completed commands.
-/// Also tracks global alarm state to block new command dispatching when any device has an active alarm.
+/// Also tracks device error state to block new command dispatching when any device has an error.
 /// Uses client-provided CommandId (string) as primary key.
 /// </summary>
 internal sealed class PendingCommandTracker
@@ -16,16 +16,10 @@ internal sealed class PendingCommandTracker
     private readonly ConcurrentDictionary<string, CommandTrackingInfo> _commandInfo = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Tracks commands that have active alarms (received Alarm notification but not yet completed).
-    /// Used to block all new command dispatching when any device has an alarm.
-    /// Key: CommandId, Value: ErrorDetail of the alarm.
-    /// </summary>
-    private readonly ConcurrentDictionary<string, ErrorDetail> _activeAlarms = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Tracks devices that are in error state (Failed/Timeout) and need recovery.
-    /// Key: DeviceId, Value: (SlotId, ErrorMessage, ErrorTime).
+    /// Tracks devices that are in error state (Alarm/Failed/Timeout) and need recovery.
+    /// Key: DeviceId, Value: DeviceErrorInfo with SlotId, ErrorCode, ErrorMessage, ErrorTime.
     /// All slots of a device are blocked when ANY slot of that device enters error state.
+    /// Unified tracking: both PLC alarms and command failures set device error.
     /// </summary>
     private readonly ConcurrentDictionary<string, DeviceErrorInfo> _deviceErrors = new(StringComparer.OrdinalIgnoreCase);
 
@@ -96,73 +90,33 @@ internal sealed class PendingCommandTracker
             info.PlcError = result.PlcError;
         }
 
-        // Clear alarm when command completes (regardless of status)
-        ClearAlarm(commandId);
-
         Interlocked.Increment(ref _totalCompleted);
 
-        if (result.Status == ExecutionStatus.Alarm)
+        if (result.Status == ExecutionStatus.Failed || 
+            result.Status == ExecutionStatus.Timeout ||
+            result.Status == ExecutionStatus.Alarm)
         {
             Interlocked.Increment(ref _totalErrors);
         }
     }
 
     /// <summary>
-    /// Sets an active alarm for a command.
-    /// Called when Alarm notification is received during command execution.
-    /// Blocks all new command dispatching until alarm is cleared.
-    /// </summary>
-    /// <param name="commandId">Command that has the alarm.</param>
-    /// <param name="error">Error details of the alarm.</param>
-    public void SetAlarm(string commandId, ErrorDetail error)
-    {
-        _activeAlarms[commandId] = error;
-    }
-
-    /// <summary>
-    /// Clears an active alarm for a command.
-    /// Called when command execution completes (success or failure).
-    /// </summary>
-    /// <param name="commandId">Command to clear alarm for.</param>
-    public void ClearAlarm(string commandId)
-    {
-        _activeAlarms.TryRemove(commandId, out _);
-    }
-
-    /// <summary>
-    /// Checks if there are any active alarms in the system.
-    /// Used by Matchmaker to block all new command dispatching when any device has an alarm.
-    /// This prevents sending new commands while a device is in error state and not yet recovered.
-    /// </summary>
-    /// <returns>True if any command has an active alarm, false otherwise.</returns>
-    public bool HasActiveAlarm()
-    {
-        return !_activeAlarms.IsEmpty;
-    }
-
-    /// <summary>
-    /// Gets all active alarms in the system.
-    /// </summary>
-    /// <returns>Dictionary of command IDs to their error details.</returns>
-    public IReadOnlyDictionary<string, ErrorDetail> GetActiveAlarms()
-    {
-        return _activeAlarms.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
-    }
-
-    /// <summary>
     /// Sets a device into error state. All slots of this device will be blocked from receiving new commands.
-    /// Called when any slot of a device encounters Failed/Timeout status.
+    /// Called when any slot of a device encounters Alarm/Failed/Timeout status.
+    /// Unified tracking: replaces both SetAlarm and SetDeviceError concepts.
     /// </summary>
     /// <param name="deviceId">Device identifier.</param>
     /// <param name="slotId">Slot that encountered the error.</param>
     /// <param name="errorMessage">Error description.</param>
-    public void SetDeviceError(string deviceId, int slotId, string errorMessage)
+    /// <param name="errorCode">Optional error code from PLC.</param>
+    public void SetDeviceError(string deviceId, int slotId, string errorMessage, int? errorCode = null)
     {
         _deviceErrors[deviceId] = new DeviceErrorInfo
         {
             DeviceId = deviceId,
             SlotId = slotId,
             ErrorMessage = errorMessage,
+            ErrorCode = errorCode,
             ErrorTime = DateTimeOffset.UtcNow
         };
     }
@@ -412,6 +366,7 @@ internal sealed class CommandTrackingInfo
 
 /// <summary>
 /// Information about a device error state.
+/// Unified tracking for both PLC alarms and command failures.
 /// </summary>
 internal sealed class DeviceErrorInfo
 {
@@ -429,6 +384,11 @@ internal sealed class DeviceErrorInfo
     /// Error description.
     /// </summary>
     public required string ErrorMessage { get; init; }
+
+    /// <summary>
+    /// Error code from PLC (if available).
+    /// </summary>
+    public int? ErrorCode { get; init; }
 
     /// <summary>
     /// Time when error occurred.

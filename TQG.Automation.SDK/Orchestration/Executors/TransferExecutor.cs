@@ -189,6 +189,10 @@ internal sealed class TransferExecutor(IPlcClient plcClient, SignalMap signalMap
                 steps,
                 signal.Error),
 
+            Models.SignalType.None => Models.CommandExecutionResult.Timeout(
+                "Command monitoring ended without completion signal (possible timeout or cancellation)",
+                steps),
+
             _ => Models.CommandExecutionResult.Failed("Unknown signal detected", steps)
         };
     }

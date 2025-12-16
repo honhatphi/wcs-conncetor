@@ -56,19 +56,13 @@ internal sealed class ReplyHub
             // Main loop: read from ResultChannel (blocking)
             await foreach (var result in _channels.ResultChannel.Reader.ReadAllAsync(cancellationToken))
             {
-                // Handle alarm tracking for global alarm state
-                if (result.Status == ExecutionStatus.Alarm && result.PlcError != null)
-                {
-                    // Set global alarm - blocks all new command dispatching
-                    _tracker.SetAlarm(result.CommandId, result.PlcError);
-                    _logger?.LogWarning($"[ReplyHub] Alarm set for {result.CommandId}: {result.PlcError.ErrorMessage} (Code: {result.PlcError.ErrorCode})");
-                }
+                // Handle device error state based on result status
+                HandleDeviceErrorState(result);
 
                 // Only mark as completed for FINAL status
                 // Alarm status is an intermediate notification - command is still executing
                 if (IsFinalStatus(result.Status))
                 {
-                    // MarkAsCompleted also clears any active alarm for this command
                     _tracker.MarkAsCompleted(result.CommandId, result);
                     
                     // Log based on status
@@ -163,11 +157,46 @@ internal sealed class ReplyHub
     {
         return status switch
         {
-            ExecutionStatus.Success => true,  // Command completed successfully
-            ExecutionStatus.Failed => true,   // Command failed
-            ExecutionStatus.Timeout => true,  // Command timed out
-            ExecutionStatus.Alarm => false,   // Intermediate: Alarm notification, command still executing
-            _ => true                         // Unknown status treated as final for safety
+            ExecutionStatus.Success => true,    // Command completed successfully
+            ExecutionStatus.Failed => true,     // Command failed (includes cancelled)
+            ExecutionStatus.Timeout => true,    // Command timed out
+            ExecutionStatus.Alarm => false,     // Intermediate: Alarm notification, command still executing
+            _ => true                           // Unknown status treated as final for safety
         };
+    }
+
+    /// <summary>
+    /// Handles device error state based on command result.
+    /// 
+    /// Error State Rules:
+    /// - Alarm: Set device error (block dispatch until command completes)
+    /// - Success: Clear device error (allow dispatch)
+    /// - Failed/Timeout: Device error is set by SlotWorker (will clear after recovery)
+    /// </summary>
+    private void HandleDeviceErrorState(CommandResult result)
+    {
+        // Skip if no device ID (shouldn't happen, but be safe)
+        if (string.IsNullOrEmpty(result.PlcDeviceId))
+            return;
+
+        switch (result.Status)
+        {
+            case ExecutionStatus.Alarm:
+                // Alarm detected - block device from receiving new commands
+                var alarmMessage = result.PlcError?.ErrorMessage ?? "Alarm detected";
+                var alarmCode = result.PlcError?.ErrorCode;
+                _tracker.SetDeviceError(result.PlcDeviceId, result.SlotId ?? 0, alarmMessage, alarmCode);
+                _logger?.LogWarning($"[ReplyHub] Device {result.PlcDeviceId}/Slot{result.SlotId} blocked due to Alarm: {alarmMessage} (Code: {alarmCode})");
+                break;
+
+            case ExecutionStatus.Success:
+                // Success - clear device error to allow new commands
+                _tracker.ClearDeviceError(result.PlcDeviceId);
+                _logger?.LogDebug($"[ReplyHub] Device {result.PlcDeviceId} error cleared after successful command");
+                break;
+
+            // Failed/Timeout: Device error is managed by SlotWorker (set on failure, clear after recovery)
+            // We don't clear here because SlotWorker is waiting for recovery
+        }
     }
 }

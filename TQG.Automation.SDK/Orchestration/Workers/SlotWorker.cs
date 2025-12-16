@@ -230,6 +230,16 @@ internal sealed class SlotWorker : IAsyncDisposable
 
             var result = await ExecuteCommandAsync(command, cancellationToken);
 
+            // IMPORTANT: Set device error BEFORE publishing to block Matchmaker immediately
+            // This prevents race condition where Matchmaker dispatches to another slot
+            // before ReplyHub has a chance to process the error
+            if (IsErrorStatus(result.Status))
+            {
+                var errorMessage = result.Message ?? "Unknown error";
+                var errorCode = result.PlcError?.ErrorCode;
+                _tracker.SetDeviceError(_deviceId, _slotId, errorMessage, errorCode);
+            }
+
             await PublishResultAsync(result, cancellationToken);
 
             await HandlePostExecutionAsync(result, cancellationToken);
@@ -240,6 +250,8 @@ internal sealed class SlotWorker : IAsyncDisposable
         }
         catch (OperationCanceledException) when (command != null)
         {
+            // Set device error before publishing cancellation
+            _tracker.SetDeviceError(_deviceId, _slotId, "Worker stopped during execution");
             await HandleCommandCancellationAsync(command);
             throw; // Propagate to exit worker loop
         }
@@ -247,6 +259,14 @@ internal sealed class SlotWorker : IAsyncDisposable
         {
             await HandleCommandErrorAsync(command, ex, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Checks if the execution status indicates an error that requires recovery.
+    /// </summary>
+    private static bool IsErrorStatus(ExecutionStatus status)
+    {
+        return status == ExecutionStatus.Failed || status == ExecutionStatus.Timeout;
     }
 
     /// <summary>
@@ -259,7 +279,7 @@ internal sealed class SlotWorker : IAsyncDisposable
 
     /// <summary>
     /// Handles post-execution logic: signal availability or wait for recovery.
-    /// When command fails, sets device error state to block ALL slots of this device.
+    /// Device error state is already set in ProcessNextCommandAsync before publishing.
     /// </summary>
     private async Task HandlePostExecutionAsync(CommandResult result, CancellationToken cancellationToken)
     {
@@ -274,10 +294,7 @@ internal sealed class SlotWorker : IAsyncDisposable
         }
         else
         {
-            // Set device error state to block ALL slots of this device from receiving new commands
-            // This prevents other slots from processing while one slot is in error state
-            _tracker.SetDeviceError(_deviceId, _slotId, result.Message ?? "Unknown error");
-
+            // Device error already set before publish - just wait for recovery
             await WaitForDeviceRecoveryAsync(cancellationToken);
         }
     }
@@ -305,15 +322,15 @@ internal sealed class SlotWorker : IAsyncDisposable
     {
         _logger.LogError($"[{_compositeId}] Unexpected error during command {command.CommandId} execution: {exception.Message}", exception);
 
+        // Set device error BEFORE publishing to block Matchmaker immediately
+        _tracker.SetDeviceError(_deviceId, _slotId, $"Worker error: {exception.Message}");
+
         var result = CreateErrorResult(
             command.CommandId,
             ExecutionStatus.Failed,
             $"Worker error: {exception.Message}");
 
         await TryPublishResultAsync(result);
-
-        // Set device error state
-        _tracker.SetDeviceError(_deviceId, _slotId, $"Worker error: {exception.Message}");
 
         if (!cancellationToken.IsCancellationRequested)
         {

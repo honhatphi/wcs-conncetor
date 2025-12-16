@@ -20,6 +20,7 @@
    - Khi bất kỳ slot nào gặp lỗi (Failed/Timeout), toàn bộ device sẽ bị khóa
    - Các slot khác của cùng device không thể nhận lệnh mới cho đến khi recovery hoàn tất
    - Bộ phân bổ lệnh kiểm tra trạng thái device trước khi phân phối
+   - **Ví dụ:** Device có 2 slot (Slot1 và Slot2). Nếu Slot1 gặp lỗi → Slot2 cũng bị khóa ngay lập tức, không nhận lệnh mới cho đến khi Slot1 được recovery thành công
 
 6. **Bổ sung logging cho quá trình Recovery**
    - Thêm log Warning/Info trong `WaitForManualRecoveryAsync` và `WaitForAutoRecoveryAsync`
