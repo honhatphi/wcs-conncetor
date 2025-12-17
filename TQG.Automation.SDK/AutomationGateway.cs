@@ -629,7 +629,7 @@ public sealed class AutomationGateway : IAsyncDisposable
             if (deviceStatus == DeviceStatus.Busy)
             {
                 _logger.LogWarning($"Cannot reset device {deviceId} - device is busy");
-                throw new InvalidOperationException($"Cannot reset device '{deviceId}' while it is executing a command. Wait for command completion or use manual intervention.");
+                return false;
             }
 
             var result = _orchestrator.TriggerDeviceRecovery(deviceId);

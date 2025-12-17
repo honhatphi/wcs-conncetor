@@ -166,12 +166,15 @@ internal sealed class ReplyHub
     }
 
     /// <summary>
-    /// Handles device error state based on command result.
+    /// Handles device alarm/error state based on command result.
     /// 
-    /// Error State Rules:
-    /// - Alarm: Set device error (block dispatch until command completes)
-    /// - Success: Clear device error (allow dispatch)
-    /// - Failed/Timeout: Device error is set by SlotWorker (will clear after recovery)
+    /// State Rules:
+    /// - Alarm: Set device ALARM (does NOT require recovery, just tracking)
+    /// - Success: Clear device ALARM (if any)
+    /// - Failed/Timeout: Device FAILURE is set by SlotWorker (requires recovery)
+    /// 
+    /// Note: Alarms don't block dispatch - they are just tracked for monitoring.
+    /// Only failures (set by SlotWorker) block dispatch until recovery.
     /// </summary>
     private void HandleDeviceErrorState(CommandResult result)
     {
@@ -182,21 +185,23 @@ internal sealed class ReplyHub
         switch (result.Status)
         {
             case ExecutionStatus.Alarm:
-                // Alarm detected - block device from receiving new commands
+                // Alarm detected - track for monitoring but does NOT block dispatch
+                // SlotWorker will continue executing and signal availability when done
                 var alarmMessage = result.PlcError?.ErrorMessage ?? "Alarm detected";
-                var alarmCode = result.PlcError?.ErrorCode;
-                _tracker.SetDeviceError(result.PlcDeviceId, result.SlotId ?? 0, alarmMessage, alarmCode);
-                _logger?.LogWarning($"[ReplyHub] Device {result.PlcDeviceId}/Slot{result.SlotId} blocked due to Alarm: {alarmMessage} (Code: {alarmCode})");
+                var alarmCode = result.PlcError?.ErrorCode ?? 0;
+                _tracker.SetDeviceAlarm(result.PlcDeviceId, result.SlotId ?? 0, alarmMessage, alarmCode);
+                _logger?.LogWarning($"[ReplyHub] Device {result.PlcDeviceId}/Slot{result.SlotId} alarm recorded: {alarmMessage} (Code: {alarmCode})");
                 break;
 
             case ExecutionStatus.Success:
-                // Success - clear device error to allow new commands
-                _tracker.ClearDeviceError(result.PlcDeviceId);
-                _logger?.LogDebug($"[ReplyHub] Device {result.PlcDeviceId} error cleared after successful command");
+                // Success - clear device alarm (if any) for this device
+                _tracker.ClearDeviceAlarm(result.PlcDeviceId);
+                _logger?.LogDebug($"[ReplyHub] Device {result.PlcDeviceId} alarm cleared after successful command");
                 break;
 
-            // Failed/Timeout: Device error is managed by SlotWorker (set on failure, clear after recovery)
-            // We don't clear here because SlotWorker is waiting for recovery
+            // Failed/Timeout: Device FAILURE is managed by SlotWorker
+            // SlotWorker sets failure before publishing, and clears after recovery
+            // We don't touch failure state here
         }
     }
 }

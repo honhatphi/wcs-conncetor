@@ -230,14 +230,13 @@ internal sealed class SlotWorker : IAsyncDisposable
 
             var result = await ExecuteCommandAsync(command, cancellationToken);
 
-            // IMPORTANT: Set device error BEFORE publishing to block Matchmaker immediately
-            // This prevents race condition where Matchmaker dispatches to another slot
-            // before ReplyHub has a chance to process the error
-            if (IsErrorStatus(result.Status))
+            // Set device failure BEFORE publishing to block Matchmaker immediately
+            // Only for Failed/Timeout - these require recovery
+            // Alarm is handled differently (no recovery needed, just wait for PLC clear)
+            if (IsFailureStatus(result.Status))
             {
                 var errorMessage = result.Message ?? "Unknown error";
-                var errorCode = result.PlcError?.ErrorCode;
-                _tracker.SetDeviceError(_deviceId, _slotId, errorMessage, errorCode);
+                _tracker.SetDeviceFailure(_deviceId, _slotId, errorMessage);
             }
 
             await PublishResultAsync(result, cancellationToken);
@@ -250,8 +249,8 @@ internal sealed class SlotWorker : IAsyncDisposable
         }
         catch (OperationCanceledException) when (command != null)
         {
-            // Set device error before publishing cancellation
-            _tracker.SetDeviceError(_deviceId, _slotId, "Worker stopped during execution");
+            // Set device failure before publishing cancellation
+            _tracker.SetDeviceFailure(_deviceId, _slotId, "Worker stopped during execution");
             await HandleCommandCancellationAsync(command);
             throw; // Propagate to exit worker loop
         }
@@ -262,9 +261,10 @@ internal sealed class SlotWorker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Checks if the execution status indicates an error that requires recovery.
+    /// Checks if the execution status indicates a failure that requires recovery.
+    /// Note: Alarm does NOT require recovery - only Failed/Timeout do.
     /// </summary>
-    private static bool IsErrorStatus(ExecutionStatus status)
+    private static bool IsFailureStatus(ExecutionStatus status)
     {
         return status == ExecutionStatus.Failed || status == ExecutionStatus.Timeout;
     }
@@ -279,7 +279,11 @@ internal sealed class SlotWorker : IAsyncDisposable
 
     /// <summary>
     /// Handles post-execution logic: signal availability or wait for recovery.
-    /// Device error state is already set in ProcessNextCommandAsync before publishing.
+    /// 
+    /// Post-execution behavior:
+    /// - Success: Signal availability after delay
+    /// - Alarm: Signal availability after delay (alarm tracked but no recovery needed)
+    /// - Failed/Timeout: Wait for recovery (failure already set before publish)
     /// </summary>
     private async Task HandlePostExecutionAsync(CommandResult result, CancellationToken cancellationToken)
     {
@@ -294,7 +298,7 @@ internal sealed class SlotWorker : IAsyncDisposable
         }
         else
         {
-            // Device error already set before publish - just wait for recovery
+            // Failed/Timeout - device failure already set before publish, wait for recovery
             await WaitForDeviceRecoveryAsync(cancellationToken);
         }
     }
@@ -322,8 +326,8 @@ internal sealed class SlotWorker : IAsyncDisposable
     {
         _logger.LogError($"[{_compositeId}] Unexpected error during command {command.CommandId} execution: {exception.Message}", exception);
 
-        // Set device error BEFORE publishing to block Matchmaker immediately
-        _tracker.SetDeviceError(_deviceId, _slotId, $"Worker error: {exception.Message}");
+        // Set device failure BEFORE publishing to block Matchmaker immediately
+        _tracker.SetDeviceFailure(_deviceId, _slotId, $"Worker error: {exception.Message}");
 
         var result = CreateErrorResult(
             command.CommandId,
@@ -604,8 +608,8 @@ internal sealed class SlotWorker : IAsyncDisposable
                     if (errorFlagsCleared)
                     {
                         _logger.LogInformation($"[{_compositeId}] Auto-recovery successful. Device ready and error flags cleared.");
-                        // Clear device error state - allow ALL slots to receive new commands
-                        _tracker.ClearDeviceError(_deviceId);
+                        // Clear device failure state - allow this device to receive new commands
+                        _tracker.ClearDeviceFailure(_deviceId);
 
                         await SignalAvailabilityAsync(cancellationToken);
                         return;
@@ -675,8 +679,8 @@ internal sealed class SlotWorker : IAsyncDisposable
                     if (errorFlagsCleared)
                     {
                         _logger.LogInformation($"[{_compositeId}] Manual recovery successful. Device ready and error flags cleared.");
-                        // Clear device error state - allow ALL slots to receive new commands
-                        _tracker.ClearDeviceError(_deviceId);
+                        // Clear device failure state - allow this device to receive new commands
+                        _tracker.ClearDeviceFailure(_deviceId);
 
                         await SignalAvailabilityAsync(cancellationToken);
                         return;

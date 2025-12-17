@@ -304,13 +304,12 @@ internal sealed class Matchmaker
     /// <summary>
     /// Finds matching slot for a command.
     /// Returns deviceId, slotId, and index if found, otherwise indicates no match.
-    /// Considers slot capabilities, device error state, and Inbound/Outbound conflict rules.
+    /// Considers slot capabilities and device failure state.
     /// Prefers slots in order (Slot 1 before Slot 2) for predictability.
     /// 
-    /// Conflict Rules (apply at DEVICE level, across ALL slots):
-    /// - Cannot dispatch to any device that is in error state (needs recovery first)
-    /// - Cannot dispatch Inbound to any slot if another slot is processing Outbound
-    /// - Cannot dispatch Outbound to any slot if another slot is processing Inbound
+    /// Device Error Rules:
+    /// - Device with FAILURE (command fail, timeout): BLOCKED until recovery
+    /// - Device with ALARM only: Can dispatch if slot is available (alarm cleared by SlotWorker)
     /// - Transfer commands only go to slots that support Transfer
     /// </summary>
     private SlotMatchResult TryFindMatchingSlot(
@@ -328,15 +327,17 @@ internal sealed class Matchmaker
         if (HasDeviceAffinity(command))
         {
             // Device-specific command: must use specified device
-            // First check if the specified device is in error state
-            if (_tracker.IsDeviceInError(command.PlcDeviceId!))
+            // Check if the specified device has a FAILURE (requires recovery)
+            if (_tracker.HasDeviceFailure(command.PlcDeviceId!))
             {
-                LogBlockReasonOnce($"{command.CommandId}:device-error:{command.PlcDeviceId}",
-                    $"[Matchmaker] No slot match for {command.CommandId}: target device {command.PlcDeviceId} is in error state");
-                return SlotMatchResult.NotFound; // Device in error, cannot dispatch
+                var failure = _tracker.GetDeviceFailure(command.PlcDeviceId!);
+                LogBlockReasonOnce($"{command.CommandId}:device-failure:{command.PlcDeviceId}",
+                    $"[Matchmaker] No slot match for {command.CommandId}: target device {command.PlcDeviceId} has failure requiring recovery: {failure?.ErrorMessage}");
+                return SlotMatchResult.NotFound; // Device has failure, cannot dispatch until recovery
             }
 
             // Find slots belonging to the specified device, ordered by SlotId
+            // Note: If device has alarm but slot is available, it means SlotWorker has cleared the alarm
             var deviceSlots = availableSlots
                 .Select((slot, index) => (slot, index))
                 .Where(x => x.slot.DeviceId.Equals(command.PlcDeviceId, StringComparison.OrdinalIgnoreCase))
@@ -359,10 +360,11 @@ internal sealed class Matchmaker
         {
             // Any-device command: find first available slot that supports this command type
             // Order by DeviceId then SlotId for predictability
-            // Skip devices that are in error state
+            // Skip devices that have FAILURE (requires recovery)
+            // Note: Devices with alarm only are OK if their slot is available
             var orderedSlots = availableSlots
                 .Select((slot, index) => (slot, index))
-                .Where(x => !_tracker.IsDeviceInError(x.slot.DeviceId)) // Filter out devices in error
+                .Where(x => !_tracker.HasDeviceFailure(x.slot.DeviceId)) // Only filter out devices with failure
                 .OrderBy(x => x.slot.DeviceId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.slot.SlotId)
                 .ToList();
@@ -406,27 +408,16 @@ internal sealed class Matchmaker
     /// Returns block reason via out parameter for logging.
     /// 
     /// Rules:
-    /// - If any device has error (Alarm/Failed/Timeout) → cannot dispatch ANY command (must wait for recovery)
     /// - If any device is processing Transfer or CheckPallet → cannot dispatch ANY command (must wait)
     /// - If dispatching Transfer or CheckPallet → no other command can be processing (must wait)
     /// - If any device is processing Inbound → cannot dispatch Outbound (must wait)
     /// - If any device is processing Outbound → cannot dispatch Inbound (must wait)
+    /// 
+    /// Note: Device-specific blocking (alarm/failure) is handled in TryFindMatchingSlot per-device.
     /// </summary>
     private bool CanDispatchCommandType(CommandType commandType, out string blockReason)
     {
         blockReason = string.Empty;
-
-        // Rule: If any device is in error state (Alarm/Failed/Timeout) → block ALL new commands
-        // This handles the scenario where 2 logical devices share 1 physical device:
-        // When Device A has error, Device B's physical device is also blocked
-        // Must wait for recovery before dispatching any command
-        if (_tracker.HasDeviceErrors())
-        {
-            var errorDevices = _tracker.GetDeviceErrors();
-            var errorSummary = string.Join(", ", errorDevices.Select(e => $"{e.Key}:Slot{e.Value.SlotId}"));
-            blockReason = $"device(s) in error state [{errorSummary}]";
-            return false;
-        }
 
         // Get all currently processing commands
         var processingCommands = _tracker.GetProcessingCommands().ToList();
